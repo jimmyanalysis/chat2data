@@ -1,4 +1,4 @@
-<!-- templates/chat.html - Enhanced Chat Page with Auto Base URL Detection -->
+<!-- templates/chat.html - Enhanced Chat Page with Chart Display Support (English Version) -->
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -298,6 +298,159 @@
         .status-indicator.show {
             opacity: 1;
         }
+
+        /* Chart/Image Display Styles */
+        .chart-container {
+            margin: 15px 0;
+            padding: 10px;
+            background: #f9f9f9;
+            border-radius: 10px;
+            border: 1px solid #e0e0e0;
+        }
+
+        .chart-image {
+            max-width: 100%;
+            height: auto;
+            border-radius: 8px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+            cursor: pointer;
+            transition: transform 0.3s ease;
+        }
+
+        .chart-image:hover {
+            transform: scale(1.02);
+        }
+
+        .chart-caption {
+            text-align: center;
+            font-size: 0.9em;
+            color: #666;
+            margin-top: 8px;
+            font-style: italic;
+        }
+
+        .chart-actions {
+            display: flex;
+            justify-content: center;
+            gap: 10px;
+            margin-top: 10px;
+        }
+
+        .chart-action-btn {
+            background: #667eea;
+            color: white;
+            border: none;
+            padding: 5px 12px;
+            border-radius: 15px;
+            font-size: 0.8em;
+            cursor: pointer;
+            transition: background 0.3s ease;
+        }
+
+        .chart-action-btn:hover {
+            background: #5a6fd8;
+        }
+
+        .chart-action-btn.download {
+            background: #28a745;
+        }
+
+        .chart-action-btn.download:hover {
+            background: #218838;
+        }
+
+        /* Modal for full-size image viewing */
+        .image-modal {
+            display: none;
+            position: fixed;
+            z-index: 1000;
+            left: 0;
+            top: 0;
+            width: 100%;
+            height: 100%;
+            background-color: rgba(0,0,0,0.9);
+            cursor: pointer;
+        }
+
+        .modal-content {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            max-width: 95%;
+            max-height: 95%;
+        }
+
+        .modal-image {
+            width: 100%;
+            height: auto;
+            border-radius: 8px;
+        }
+
+        .close-modal {
+            position: absolute;
+            top: 20px;
+            right: 30px;
+            color: white;
+            font-size: 30px;
+            font-weight: bold;
+            cursor: pointer;
+            z-index: 1001;
+        }
+
+        .close-modal:hover {
+            color: #ccc;
+        }
+
+        /* Enhanced Quick Actions for Charts */
+        .chart-quick-actions {
+            display: flex;
+            gap: 5px;
+            flex-wrap: wrap;
+            margin-top: 5px;
+        }
+
+        .chart-quick-btn {
+            background: #e8f4fd;
+            border: 1px solid #b3d9ff;
+            padding: 4px 8px;
+            border-radius: 12px;
+            font-size: 0.65em;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            color: #0066cc;
+        }
+
+        .chart-quick-btn:hover {
+            background: #0066cc;
+            color: white;
+        }
+
+        /* Loading indicator for charts */
+        .chart-loading {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+            background: #f9f9f9;
+            border-radius: 8px;
+            margin: 10px 0;
+        }
+
+        .chart-loading-spinner {
+            width: 20px;
+            height: 20px;
+            border: 3px solid #f3f3f3;
+            border-top: 3px solid #667eea;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            margin-right: 10px;
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
     </style>
 </head>
 <body>
@@ -326,15 +479,16 @@
                     <strong>What I can do:</strong>
                     <br>• Execute complex SQL queries on your data
                     <br>• Provide statistical analysis and insights
-                    <br>• Generate data visualization recommendations
+                    <br>• Generate data visualizations (pie charts, bar charts, line charts)
                     <br>• Answer questions about trends and patterns
                     <br>• Perform data quality checks
                     <br><br>
                     <strong>Try asking:</strong>
                     <br>• "Show me the first 10 rows"
                     <br>• "What are the basic statistics?"
-                    <br>• "Find duplicates in my data"
-                    <br>• "Show me trends over time"
+                    <br>• "Create a pie chart of sales by category"
+                    <br>• "Generate a bar chart showing monthly revenue"
+                    <br>• "Show me trends over time with a line chart"
                     <br><br>
                     What would you like to explore?
                 </div>
@@ -356,7 +510,7 @@
             <textarea
                 class="message-input"
                 id="messageInput"
-                placeholder="Ask me anything about your data..."
+                placeholder="Ask me anything about your data or request charts..."
                 maxlength="1000"
                 rows="1"
             ></textarea>
@@ -368,14 +522,28 @@
                     <button class="quick-btn" onclick="quickQuery('Check for missing values')">🔍 Missing</button>
                     <button class="quick-btn" onclick="quickQuery('Find duplicates')">🔄 Duplicates</button>
                 </div>
+                    <div class="chart-quick-actions">
+                        <button class="chart-quick-btn" onclick="quickQuery('Create a pie chart showing the top 10 categories by count')">🥧 Pie Chart</button>
+                        <button class="chart-quick-btn" onclick="quickQuery('Generate a bar chart comparing values across different categories')">📊 Bar Chart</button>
+                        <button class="chart-quick-btn" onclick="quickQuery('Show me a line chart of trends over time if there are date columns')">📈 Line Chart</button>
+                        <button class="chart-quick-btn" onclick="quickQuery('Create a horizontal bar chart ranking the top items')">📋 Ranking Chart</button>
+                    </div>
             </div>
         </div>
     </div>
 
     <div class="status-indicator" id="statusIndicator"></div>
 
+    <!-- Image Modal -->
+    <div class="image-modal" id="imageModal" onclick="closeImageModal()">
+        <span class="close-modal" onclick="closeImageModal()">&times;</span>
+        <div class="modal-content">
+            <img class="modal-image" id="modalImage" src="" alt="Chart">
+        </div>
+    </div>
+
     <script>
-        // 自动检测base URL
+        // Auto-detect base URL
         const BASE_URL = '{{ base_url }}';
         let isLoading = false;
         let currentTableName = '';
@@ -405,7 +573,7 @@
                 });
         });
 
-        // Send message
+        // Send message function
         function sendMessage() {
             const input = document.getElementById('messageInput');
             const message = input.value.trim();
@@ -490,9 +658,21 @@
             messagesContainer.scrollTop = messagesContainer.scrollHeight;
         }
 
-        // Format message content
+        // Format message content with chart detection
         function formatMessageContent(content, type) {
             if (type === 'ai') {
+                // Check for chart URLs in the content
+                const chartUrlRegex = new RegExp(`(${BASE_URL}/uploads/[^\\s]+\\.png)`, 'g');
+                const chartMatches = content.match(chartUrlRegex);
+
+                if (chartMatches) {
+                    chartMatches.forEach(chartUrl => {
+                        const chartName = chartUrl.split('/').pop();
+                        const chartHtml = createChartDisplay(chartUrl, chartName);
+                        content = content.replace(chartUrl, chartHtml);
+                    });
+                }
+
                 // Format SQL code blocks
                 content = content.replace(/```sql\n([\s\S]*?)\n```/g, '<div class="sql-code">$1</div>');
                 content = content.replace(/```\n([\s\S]*?)\n```/g, '<div class="sql-code">$1</div>');
@@ -507,18 +687,60 @@
             return content;
         }
 
-        // Show typing state
+        // Create chart display HTML
+        function createChartDisplay(chartUrl, chartName) {
+            const chartId = 'chart_' + Math.random().toString(36).substr(2, 9);
+            return `
+                <div class="chart-container">
+                    <img src="${chartUrl}" alt="Generated Chart" class="chart-image" id="${chartId}" onclick="openImageModal('${chartUrl}')">
+                    <div class="chart-caption">Chart: ${chartName}</div>
+                    <div class="chart-actions">
+                        <button class="chart-action-btn" onclick="openImageModal('${chartUrl}')">🔍 View Full Size</button>
+                        <button class="chart-action-btn download" onclick="downloadChart('${chartUrl}', '${chartName}')">💾 Download</button>
+                    </div>
+                </div>
+            `;
+        }
+
+        // Open image modal for full-size viewing
+        function openImageModal(imageUrl) {
+            const modal = document.getElementById('imageModal');
+            const modalImage = document.getElementById('modalImage');
+            modalImage.src = imageUrl;
+            modal.style.display = 'block';
+            document.body.style.overflow = 'hidden'; // Prevent background scrolling
+        }
+
+        // Close image modal
+        function closeImageModal() {
+            const modal = document.getElementById('imageModal');
+            modal.style.display = 'none';
+            document.body.style.overflow = 'auto'; // Restore scrolling
+        }
+
+        // Download chart function
+        function downloadChart(chartUrl, chartName) {
+            const link = document.createElement('a');
+            link.href = chartUrl;
+            link.download = chartName;
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+            showStatus('Chart download started', 'success');
+        }
+
+        // Show typing indicator
         function showTyping() {
             document.getElementById('typing').style.display = 'flex';
             document.getElementById('messages').scrollTop = document.getElementById('messages').scrollHeight;
         }
 
-        // Hide typing state
+        // Hide typing indicator
         function hideTyping() {
             document.getElementById('typing').style.display = 'none';
         }
 
-        // Show status indicator
+        // Show status notification
         function showStatus(message, type) {
             const indicator = document.getElementById('statusIndicator');
             indicator.textContent = message;
@@ -529,13 +751,13 @@
             }, 3000);
         }
 
-        // Auto-resize textarea
+        // Auto-resize textarea based on content
         function autoResizeTextarea(textarea) {
             textarea.style.height = 'auto';
             textarea.style.height = Math.min(textarea.scrollHeight, 120) + 'px';
         }
 
-        // Cleanup table
+        // Cleanup table function
         function cleanupTable() {
             if (!confirm('Are you sure you want to delete the imported table? This action cannot be undone.')) {
                 return;
@@ -563,7 +785,7 @@
             });
         }
 
-        // Send message on Enter key (Shift+Enter for new line)
+        // Event listeners
         document.getElementById('messageInput').addEventListener('keypress', function(e) {
             if (e.key === 'Enter' && !e.shiftKey) {
                 e.preventDefault();
@@ -571,17 +793,14 @@
             }
         });
 
-        // Auto-adjust input height
         document.getElementById('messageInput').addEventListener('input', function(e) {
             autoResizeTextarea(this);
         });
 
-        // Prevent form submission on enter
+        // Close modal with Escape key
         document.addEventListener('keydown', function(e) {
-            if (e.key === 'Enter' && e.target.tagName === 'TEXTAREA') {
-                if (!e.shiftKey) {
-                    e.preventDefault();
-                }
+            if (e.key === 'Escape') {
+                closeImageModal();
             }
         });
     </script>

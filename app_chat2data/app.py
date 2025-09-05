@@ -1,4 +1,4 @@
-from flask import Flask, render_template, request, jsonify, session, redirect, url_for
+from flask import Flask, render_template, request, jsonify, session, redirect, url_for, send_from_directory
 from werkzeug.utils import secure_filename
 import pandas as pd
 import mysql.connector
@@ -10,13 +10,26 @@ import re
 from datetime import datetime
 from dateutil import parser as dateutil_parser
 from config import Config
+from chart_generator import ChartGeneratorTool, create_chart_tool
 
-# LangChain imports
-from langchain.agents import create_sql_agent
-from langchain.agents.agent_toolkits import SQLDatabaseToolkit
-from langchain.sql_database import SQLDatabase
-from langchain.llms import OpenAI
-from langchain.memory import ConversationBufferMemory
+
+# 修复后的LangChain imports - 使用最新版本
+try:
+    from langchain.agents import create_sql_agent
+    from langchain.agents.agent_toolkits import SQLDatabaseToolkit
+    from langchain_community.utilities import SQLDatabase
+    from langchain_openai import OpenAI  # 新版本的导入方式
+    from langchain.memory import ConversationBufferMemory
+except ImportError:
+    # 如果新版本不可用，尝试旧版本
+    from langchain.agents import create_sql_agent
+    from langchain.agents.agent_toolkits import SQLDatabaseToolkit
+    from langchain.sql_database import SQLDatabase
+    from langchain.llms import OpenAI
+    from langchain.memory import ConversationBufferMemory
+
+# 添加图表生成工具导入
+from chart_generator import ChartGeneratorTool
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -28,6 +41,7 @@ app.config.from_object(Config)
 # Ensure upload directory exists
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 
+
 def get_base_url():
     """根据请求来源自动确定base URL"""
     if request:
@@ -37,6 +51,7 @@ def get_base_url():
         # 本地开发环境
         return ''
     return ''
+
 
 def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in {'csv', 'xlsx', 'xls'}
@@ -468,72 +483,661 @@ class DatabaseManager:
 
 class LangChainAnalyzer:
     def __init__(self):
-        self.llm = OpenAI(
-            openai_api_key=app.config['OPENAI_API_KEY'],
-            temperature=0,
-            model_name="gpt-3.5-turbo-instruct"
-        )
-        self.memory = ConversationBufferMemory(
-            memory_key="chat_history",
-            return_messages=True
-        )
+        try:
+            # 检查OpenAI API Key
+            if not app.config.get('OPENAI_API_KEY'):
+                logger.error("OPENAI_API_KEY not found in config")
+                raise ValueError("OPENAI_API_KEY is required")
+
+            logger.info("Initializing OpenAI LLM...")
+
+            # 尝试使用新版本的OpenAI
+            try:
+                from langchain_openai import OpenAI
+                self.llm = OpenAI(
+                    api_key=app.config['OPENAI_API_KEY'],
+                    temperature=0,
+                    model="gpt-3.5-turbo-instruct"
+                )
+                logger.info("Successfully initialized OpenAI with langchain_openai")
+            except ImportError:
+                logger.info("langchain_openai not available, trying legacy import...")
+                from langchain.llms import OpenAI
+                self.llm = OpenAI(
+                    openai_api_key=app.config['OPENAI_API_KEY'],
+                    temperature=0,
+                    model_name="gpt-3.5-turbo-instruct"
+                )
+                logger.info("Successfully initialized OpenAI with legacy import")
+            except Exception as e:
+                logger.error(f"Failed to initialize OpenAI: {e}")
+                # 尝试最基本的方式
+                from langchain.llms import OpenAI
+                self.llm = OpenAI(
+                    openai_api_key=app.config['OPENAI_API_KEY'],
+                    temperature=0
+                )
+                logger.info("Initialized OpenAI with basic configuration")
+
+        except Exception as e:
+            logger.error(f"Failed to initialize LLM: {e}")
+            raise
+
+        try:
+            self.memory = ConversationBufferMemory(
+                memory_key="chat_history",
+                return_messages=True
+            )
+            logger.info("Successfully initialized ConversationBufferMemory")
+        except Exception as e:
+            logger.error(f"Failed to initialize memory: {e}")
+            self.memory = None
 
     def create_sql_agent(self, connection_string, table_name):
-        """Create SQL agent with LangChain"""
+        """Create SQL agent with properly integrated chart tool"""
         try:
+            logger.info(f"Creating SQL agent for table: {table_name}")
+
+            # Create SQLDatabase
+            try:
+                from langchain_community.utilities import SQLDatabase
+            except ImportError:
+                from langchain.sql_database import SQLDatabase
+
             db = SQLDatabase.from_uri(connection_string)
+
+            # Create toolkit and get SQL tools
+            try:
+                from langchain_community.agent_toolkits.sql.toolkit import SQLDatabaseToolkit
+            except ImportError:
+                from langchain.agents.agent_toolkits import SQLDatabaseToolkit
+
             toolkit = SQLDatabaseToolkit(db=db, llm=self.llm)
+            sql_tools = toolkit.get_tools()
 
-            agent_executor = create_sql_agent(
-                llm=self.llm,
-                toolkit=toolkit,
-                verbose=True,
-                agent_type="zero-shot-react-description",
-                memory=self.memory,
-                handle_parsing_errors=True
-            )
+            # Create chart tool
+            base_url = get_base_url()
+            from chart_generator import create_chart_tool
+            chart_tool = create_chart_tool(DatabaseManager, base_url)
 
-            return agent_executor
+            # Combine all tools
+            all_tools = sql_tools + [chart_tool]
+
+            logger.info(f"All available tools: {[tool.name for tool in all_tools]}")
+
+            # Create agent with all tools
+            try:
+                from langchain.agents import create_react_agent, AgentExecutor
+                from langchain import hub
+
+                # Get a React prompt
+                try:
+                    prompt = hub.pull("hwchase17/react")
+                except:
+                    # Fallback prompt if hub doesn't work
+                    from langchain.prompts import PromptTemplate
+                    prompt = PromptTemplate.from_template("""
+                    Answer the following questions as best you can. You have access to the following tools:
+
+                    {tools}
+
+                    Use the following format:
+
+                    Question: the input question you must answer
+                    Thought: you should always think about what to do
+                    Action: the action to take, should be one of [{tool_names}]
+                    Action Input: the input to the action
+                    Observation: the result of the action
+                    ... (this Thought/Action/Action Input/Observation can repeat N times)
+                    Thought: I now know the final answer
+                    Final Answer: the final answer to the original input question
+
+                    Question: {input}
+                    Thought: {agent_scratchpad}
+                    """)
+
+                # Create the agent
+                agent = create_react_agent(self.llm, all_tools, prompt)
+
+                # Create the executor
+                agent_executor = AgentExecutor(
+                    agent=agent,
+                    tools=all_tools,
+                    verbose=True,
+                    handle_parsing_errors=True,
+                    max_iterations=10,
+                    max_execution_time=60
+                )
+
+                logger.info("Successfully created React agent with chart tools")
+                return agent_executor
+
+            except Exception as react_error:
+                logger.warning(f"React agent creation failed: {react_error}")
+
+                # Fallback: Try the old create_sql_agent but with explicit extra_tools
+                try:
+                    from langchain.agents import create_sql_agent, AgentType
+
+                    agent_executor = create_sql_agent(
+                        llm=self.llm,
+                        toolkit=toolkit,
+                        verbose=True,
+                        agent_type=AgentType.ZERO_SHOT_REACT_DESCRIPTION,
+                        handle_parsing_errors=True,
+                        max_iterations=10,
+                        extra_tools=[chart_tool]  # This is the key fix
+                    )
+
+                    logger.info("Created SQL agent with extra_tools parameter")
+                    return agent_executor
+
+                except Exception as sql_error:
+                    logger.error(f"SQL agent creation also failed: {sql_error}")
+
+                    # Last resort: Create a custom agent executor
+                    try:
+                        from langchain.agents import AgentExecutor, ZeroShotAgent
+                        from langchain.prompts import PromptTemplate
+
+                        # Create custom prompt that includes chart tool
+                        tool_names = [tool.name for tool in all_tools]
+                        tool_descriptions = "\n".join([f"{tool.name}: {tool.description}" for tool in all_tools])
+
+                        prompt_template = f"""
+                        Answer the following questions as best you can. You have access to these tools:
+
+                        {tool_descriptions}
+
+                        Use this format:
+                        Question: the input question
+                        Thought: think about what to do
+                        Action: choose from [{', '.join(tool_names)}]
+                        Action Input: the input to the action
+                        Observation: the result of the action
+                        ... (repeat Thought/Action/Action Input/Observation as needed)
+                        Thought: I now know the final answer
+                        Final Answer: the final answer
+
+                        Question: {{input}}
+                        Thought: {{agent_scratchpad}}
+                        """
+
+                        prompt = PromptTemplate.from_template(prompt_template)
+                        llm_chain = prompt | self.llm
+
+                        agent = ZeroShotAgent(llm_chain=llm_chain, tools=all_tools)
+                        agent_executor = AgentExecutor.from_agent_and_tools(
+                            agent=agent,
+                            tools=all_tools,
+                            verbose=True,
+                            handle_parsing_errors=True,
+                            max_iterations=10
+                        )
+
+                        logger.info("Created custom agent executor")
+                        return agent_executor
+
+                    except Exception as custom_error:
+                        logger.error(f"Custom agent creation failed: {custom_error}")
+                        return None
+
         except Exception as e:
             logger.error(f"SQL Agent creation error: {e}")
+            import traceback
+            traceback.print_exc()
             return None
 
+
     def analyze_with_langchain(self, user_message, table_name, connection_info):
-        """Analyze data using LangChain SQL agent"""
+        """Analyze data with proper agent execution handling"""
         try:
+            logger.info(f"Starting analysis for message: {user_message[:100]}...")
+
             # Build connection string
             if connection_info['type'] == 'default':
                 connection_string = f"mysql+pymysql://{app.config['MYSQL_USER']}:{app.config['MYSQL_PASSWORD']}@{app.config['MYSQL_HOST']}/{app.config['MYSQL_DATABASE']}"
             else:
                 connection_string = f"mysql+pymysql://{connection_info['user']}:{connection_info['password']}@{connection_info['host']}/{connection_info['database']}"
 
-            # Create SQL agent
-            agent = self.create_sql_agent(connection_string, table_name)
+            # Check if user wants a chart
+            chart_keywords = ['chart', 'graph', 'plot', 'visualiz', 'pie', 'bar', 'line']
+            wants_chart = any(keyword in user_message.lower() for keyword in chart_keywords)
+
+            if wants_chart:
+                # Handle chart requests with the separate method
+                return self.handle_chart_request(user_message, table_name, connection_info)
+
+            # Create SQL agent for regular queries
+            agent = self.create_basic_sql_agent(connection_string, table_name)
             if not agent:
                 return "Failed to create SQL analysis agent."
 
-            # Enhanced prompt
+            # Enhanced prompt for regular analysis
             enhanced_prompt = f"""
             You are analyzing data from table '{table_name}'. 
             User question: {user_message}
-
-            Please:
-            1. Write and execute appropriate SQL queries to answer the question
-            2. Provide clear insights based on the results
-            3. If creating visualizations, suggest appropriate chart types
-            4. Explain your analysis process
-
-            Focus on being helpful and providing actionable insights.
+    
+            Please write and execute SQL queries to answer the question and provide clear insights.
+            Focus on being helpful and providing actionable insights about the data.
             """
 
-            # Execute analysis
-            result = agent.run(enhanced_prompt)
-            return result
+            # Execute analysis with proper error handling
+            try:
+                # Method 1: Try invoke (newer LangChain versions)
+                if hasattr(agent, 'invoke'):
+                    logger.info("Using invoke method")
+                    result = agent.invoke({"input": enhanced_prompt})
+
+                    # Handle different result formats
+                    if isinstance(result, dict):
+                        # Check for common output keys
+                        if "output" in result:
+                            return result["output"]
+                        elif "result" in result:
+                            return result["result"]
+                        elif "answer" in result:
+                            return result["answer"]
+                        else:
+                            # If no standard key, try to find the actual response
+                            logger.info(f"Result keys: {list(result.keys())}")
+                            # Return the first non-metadata value
+                            for key, value in result.items():
+                                if key not in ['intermediate_steps', 'chat_history'] and isinstance(value, str):
+                                    return value
+                            return str(result)
+                    else:
+                        return str(result)
+
+                # Method 2: Try run method with error handling
+                elif hasattr(agent, 'run'):
+                    logger.info("Attempting run method")
+                    try:
+                        result = agent.run(enhanced_prompt)
+                        return result
+                    except Exception as run_error:
+                        logger.warning(f"Run method failed: {run_error}")
+                        # Try with input parameter
+                        try:
+                            result = agent.run(input=enhanced_prompt)
+                            return result
+                        except Exception as run_input_error:
+                            logger.warning(f"Run with input failed: {run_input_error}")
+                            raise run_input_error
+
+                # Method 3: Try call method (older versions)
+                elif hasattr(agent, '__call__'):
+                    logger.info("Using call method")
+                    result = agent(enhanced_prompt)
+                    if isinstance(result, dict):
+                        return result.get("output", str(result))
+                    return str(result)
+
+                else:
+                    # Method 4: Direct execution if it's an executor
+                    if hasattr(agent, 'agent') and hasattr(agent, 'tools'):
+                        logger.info("Direct executor execution")
+                        result = agent.invoke({"input": enhanced_prompt})
+                        if isinstance(result, dict):
+                            return result.get("output", str(result))
+                        return str(result)
+                    else:
+                        return "Agent has no supported execution method"
+
+            except Exception as exec_error:
+                logger.error(f"Analysis execution failed: {exec_error}")
+
+                # Fallback: Direct SQL execution
+                logger.info("Attempting fallback SQL execution")
+                try:
+                    return self.fallback_sql_analysis(user_message, table_name, connection_info)
+                except Exception as fallback_error:
+                    logger.error(f"Fallback also failed: {fallback_error}")
+                    return f"Analysis failed. Error: {str(exec_error)}"
 
         except Exception as e:
             logger.error(f"LangChain analysis error: {e}")
+            import traceback
+            traceback.print_exc()
             return f"Analysis failed: {str(e)}"
 
+
+    def fallback_sql_analysis(self, user_message, table_name, connection_info):
+        """Fallback method for direct SQL analysis when agent fails"""
+        try:
+            logger.info("Using fallback SQL analysis")
+
+            # Get database connection
+            connection = DatabaseManager.get_connection()
+            if not connection:
+                return "Failed to connect to database"
+
+            # Get table schema for context
+            schema = DatabaseManager.get_table_schema(connection, table_name)
+            schema_info = [f"{col[0]} ({col[1]})" for col in schema] if schema else ["No schema available"]
+
+            # Generate simple queries based on user request
+            if any(word in user_message.lower() for word in ['first', 'preview', 'sample', 'show me']):
+                query = f"SELECT * FROM {table_name} LIMIT 10"
+            elif any(word in user_message.lower() for word in ['count', 'total', 'how many']):
+                query = f"SELECT COUNT(*) as total_records FROM {table_name}"
+            elif any(word in user_message.lower() for word in ['statistics', 'stats', 'summary']):
+                # Try to get basic stats
+                numeric_columns = [col[0] for col in schema if
+                                   'int' in col[1].lower() or 'decimal' in col[1].lower() or 'float' in col[1].lower()]
+                if numeric_columns:
+                    query = f"SELECT COUNT(*) as count, MIN({numeric_columns[0]}) as min_val, MAX({numeric_columns[0]}) as max_val FROM {table_name}"
+                else:
+                    query = f"SELECT COUNT(*) as total_records FROM {table_name}"
+            else:
+                # Default query
+                query = f"SELECT * FROM {table_name} LIMIT 5"
+
+            # Execute query
+            results, columns = DatabaseManager.execute_query(connection, query)
+            connection.close()
+
+            if not results:
+                return f"No results found. Table schema: {', '.join(schema_info)}"
+
+            # Format results
+            result_text = f"**Query executed:** `{query}`\n\n"
+            result_text += f"**Results:**\n"
+
+            # Create a simple table format
+            if len(results) <= 10:  # Only show detailed results for small datasets
+                for i, row in enumerate(results):
+                    result_text += f"Row {i + 1}: "
+                    result_text += ", ".join([f"{col}={val}" for col, val in zip(columns, row)])
+                    result_text += "\n"
+            else:
+                result_text += f"Found {len(results)} records. First few rows:\n"
+                for i in range(min(3, len(results))):
+                    row = results[i]
+                    result_text += f"Row {i + 1}: "
+                    result_text += ", ".join([f"{col}={val}" for col, val in zip(columns, row)])
+                    result_text += "\n"
+
+            result_text += f"\n**Table Info:** {len(schema_info)} columns: {', '.join(schema_info)}"
+
+            return result_text
+
+        except Exception as e:
+            logger.error(f"Fallback analysis failed: {e}")
+            return f"Fallback analysis failed: {str(e)}"
+
+
+    def create_basic_sql_agent(self, connection_string, table_name):
+        """Create basic SQL agent with improved error handling"""
+        try:
+            logger.info(f"Creating basic SQL agent for table: {table_name}")
+
+            # Create SQLDatabase
+            try:
+                from langchain_community.utilities import SQLDatabase
+            except ImportError:
+                from langchain.sql_database import SQLDatabase
+
+            db = SQLDatabase.from_uri(connection_string)
+            logger.info("Database connection successful")
+
+            # Create toolkit
+            try:
+                from langchain_community.agent_toolkits.sql.toolkit import SQLDatabaseToolkit
+            except ImportError:
+                from langchain.agents.agent_toolkits import SQLDatabaseToolkit
+
+            toolkit = SQLDatabaseToolkit(db=db, llm=self.llm)
+
+            # Create agent with minimal configuration
+            try:
+                from langchain.agents import create_sql_agent
+
+                agent = create_sql_agent(
+                    llm=self.llm,
+                    toolkit=toolkit,
+                    verbose=True,
+                    handle_parsing_errors=True,
+                    max_iterations=3,  # Reduced to avoid timeouts
+                    max_execution_time=30
+                )
+
+                logger.info("Basic SQL agent created successfully")
+                return agent
+
+            except Exception as agent_error:
+                logger.error(f"SQL agent creation failed: {agent_error}")
+
+                # Try alternative agent creation
+                try:
+                    from langchain.agents import AgentType
+                    agent = create_sql_agent(
+                        llm=self.llm,
+                        toolkit=toolkit,
+                        agent_type=AgentType.ZERO_SHOT_REACT_DESCRIPTION,
+                        verbose=True,
+                        handle_parsing_errors=True
+                    )
+                    logger.info("Alternative SQL agent created")
+                    return agent
+                except Exception as alt_error:
+                    logger.error(f"Alternative agent creation failed: {alt_error}")
+                    return None
+
+        except Exception as e:
+            logger.error(f"Basic SQL agent creation error: {e}")
+            return None
+
+
+    def handle_chart_request(self, user_message, table_name, connection_info):
+        """Handle chart requests by analyzing user intent and generating appropriate charts"""
+        try:
+            logger.info(f"Handling chart request: {user_message}")
+
+            # Get database connection
+            connection = DatabaseManager.get_connection()
+            if not connection:
+                return "Failed to connect to database for chart generation"
+
+            try:
+                # Get table schema to understand available columns
+                schema = DatabaseManager.get_table_schema(connection, table_name)
+                if not schema:
+                    connection.close()
+                    return f"Could not get schema for table {table_name}"
+
+                columns = [col[0] for col in schema]
+                logger.info(f"Available columns: {columns}")
+
+                # Determine chart type from user message
+                chart_type = "bar"  # default
+                if 'pie' in user_message.lower():
+                    chart_type = "pie"
+                elif 'line' in user_message.lower():
+                    chart_type = "line"
+                elif 'horizontal' in user_message.lower() or 'ranking' in user_message.lower():
+                    chart_type = "horizontal_bar"
+
+                # Generate appropriate SQL query based on chart type and available columns
+                sql_query = self.generate_chart_query(table_name, columns, chart_type, user_message)
+
+                logger.info(f"Generated query: {sql_query}")
+
+                # Execute the query
+                results, result_columns = DatabaseManager.execute_query(connection, sql_query)
+                connection.close()
+
+                if not results or len(result_columns) < 2:
+                    return f"Query returned insufficient data for chart. SQL: {sql_query}"
+
+                # Create chart
+                from chart_generator import ChartGenerator
+                chart_generator = ChartGenerator()
+                base_url = get_base_url()
+
+                # Convert data for chart
+                import pandas as pd
+                df = pd.DataFrame(results, columns=result_columns)
+
+                # Generate chart title
+                title = f"{chart_type.title()} Chart of {result_columns[1]} by {result_columns[0]}"
+                if "count" in result_columns[1].lower():
+                    title = f"Distribution of {result_columns[0]}"
+
+                filename = None
+
+                if chart_type == "pie":
+                    labels = df.iloc[:, 0].astype(str).tolist()
+                    values = pd.to_numeric(df.iloc[:, 1], errors='coerce').tolist()
+
+                    # Remove any NaN values
+                    clean_data = [(l, v) for l, v in zip(labels, values) if not pd.isna(v)]
+                    if clean_data:
+                        labels, values = zip(*clean_data)
+                        # Limit to top 10 for readability
+                        if len(labels) > 10:
+                            sorted_data = sorted(zip(labels, values), key=lambda x: x[1], reverse=True)[:10]
+                            labels, values = zip(*sorted_data)
+
+                        filename = chart_generator.create_pie_chart(list(values), list(labels), title)
+
+                elif chart_type in ["bar", "horizontal_bar"]:
+                    x_data = df.iloc[:, 0].astype(str).tolist()
+                    y_data = pd.to_numeric(df.iloc[:, 1], errors='coerce').tolist()
+
+                    # Remove any NaN values
+                    clean_data = [(x, y) for x, y in zip(x_data, y_data) if not pd.isna(y)]
+                    if clean_data:
+                        x_data, y_data = zip(*clean_data)
+                        horizontal = chart_type == "horizontal_bar"
+                        filename = chart_generator.create_bar_chart(
+                            list(x_data), list(y_data), title,
+                            result_columns[0], result_columns[1], horizontal
+                        )
+
+                elif chart_type == "line":
+                    x_data = df.iloc[:, 0].tolist()
+                    y_data = pd.to_numeric(df.iloc[:, 1], errors='coerce').tolist()
+
+                    # Remove any NaN values
+                    clean_data = [(x, y) for x, y in zip(x_data, y_data) if not pd.isna(y)]
+                    if clean_data:
+                        x_data, y_data = zip(*clean_data)
+                        filename = chart_generator.create_line_chart(
+                            list(x_data), list(y_data), title,
+                            result_columns[0], result_columns[1]
+                        )
+
+                if filename:
+                    chart_url = f"{base_url}/uploads/{filename}"
+                    return f"""✅ **Chart Generated Successfully!**
+    
+    📊 **Chart Type:** {chart_type.replace('_', ' ').title()}
+    📈 **Title:** {title}
+    
+    🔗 **View Chart:** {chart_url}
+    
+    📋 **Data Summary:**
+    - Records: {len(df)}
+    - Columns: {', '.join(result_columns)}
+    
+    💻 **SQL Query Used:**
+    ```sql
+    {sql_query}
+    ```
+    
+    The chart visualizes your data based on the analysis of {len(df)} records from the table."""
+                else:
+                    return f"❌ Failed to generate {chart_type} chart. The data might not be suitable for this chart type.\n\nSQL used: {sql_query}\nData preview: {df.head().to_string()}"
+
+            except Exception as exec_error:
+                if 'connection' in locals():
+                    connection.close()
+                logger.error(f"Error in chart generation: {exec_error}")
+                return f"Error generating chart: {str(exec_error)}"
+
+        except Exception as e:
+            logger.error(f"Chart request handling error: {e}")
+            import traceback
+            traceback.print_exc()
+            return f"Failed to handle chart request: {str(e)}"
+
+
+    def generate_chart_query(self, table_name, columns, chart_type, user_message):
+        """Generate appropriate SQL query for chart based on available columns and user intent"""
+        try:
+            # Look for specific column mentions in user message
+            mentioned_columns = [col for col in columns if col.lower() in user_message.lower()]
+
+            if chart_type == "pie":
+                # For pie charts, we need a categorical column to group by
+                categorical_cols = [col for col in columns if any(keyword in col.lower() for keyword in
+                                                                  ['name', 'category', 'type', 'status', 'group', 'class',
+                                                                   'product', 'region'])]
+
+                if mentioned_columns:
+                    group_col = mentioned_columns[0]
+                elif categorical_cols:
+                    group_col = categorical_cols[0]
+                else:
+                    group_col = columns[1] if len(columns) > 1 else columns[0]  # Skip ID column
+
+                return f"SELECT {group_col}, COUNT(*) as count FROM {table_name} GROUP BY {group_col} ORDER BY count DESC LIMIT 10"
+
+            elif chart_type in ["bar", "horizontal_bar"]:
+                # For bar charts, try to find categorical and numeric columns
+                categorical_cols = [col for col in columns if any(keyword in col.lower() for keyword in
+                                                                  ['name', 'category', 'type', 'status', 'group', 'class',
+                                                                   'product', 'region'])]
+                numeric_cols = [col for col in columns if any(keyword in col.lower() for keyword in
+                                                              ['price', 'amount', 'value', 'count', 'total', 'sum',
+                                                               'quantity', 'score'])]
+
+                if mentioned_columns and len(mentioned_columns) >= 2:
+                    x_col, y_col = mentioned_columns[0], mentioned_columns[1]
+                elif categorical_cols and numeric_cols:
+                    x_col, y_col = categorical_cols[0], numeric_cols[0]
+                elif categorical_cols:
+                    x_col = categorical_cols[0]
+                    y_col = "COUNT(*)"
+                    return f"SELECT {x_col}, COUNT(*) as count FROM {table_name} GROUP BY {x_col} ORDER BY count DESC LIMIT 15"
+                else:
+                    x_col, y_col = columns[1] if len(columns) > 1 else columns[0], "COUNT(*)"
+                    return f"SELECT {x_col}, COUNT(*) as count FROM {table_name} GROUP BY {x_col} ORDER BY count DESC LIMIT 15"
+
+                return f"SELECT {x_col}, {y_col} FROM {table_name} ORDER BY {y_col} DESC LIMIT 15"
+
+            elif chart_type == "line":
+                # For line charts, try to find date/time and numeric columns
+                date_cols = [col for col in columns if any(keyword in col.lower() for keyword in
+                                                           ['date', 'time', 'created', 'updated', 'year', 'month'])]
+                numeric_cols = [col for col in columns if any(keyword in col.lower() for keyword in
+                                                              ['price', 'amount', 'value', 'count', 'total', 'sum',
+                                                               'quantity', 'score'])]
+
+                if mentioned_columns and len(mentioned_columns) >= 2:
+                    x_col, y_col = mentioned_columns[0], mentioned_columns[1]
+                elif date_cols and numeric_cols:
+                    x_col, y_col = date_cols[0], numeric_cols[0]
+                elif date_cols:
+                    x_col = date_cols[0]
+                    return f"SELECT {x_col}, COUNT(*) as count FROM {table_name} GROUP BY {x_col} ORDER BY {x_col} LIMIT 20"
+                else:
+                    # Fallback to first two columns
+                    x_col = columns[0]
+                    y_col = columns[1] if len(columns) > 1 else "COUNT(*)"
+                    if y_col == "COUNT(*)":
+                        return f"SELECT {x_col}, COUNT(*) as count FROM {table_name} GROUP BY {x_col} ORDER BY {x_col} LIMIT 20"
+
+                return f"SELECT {x_col}, {y_col} FROM {table_name} ORDER BY {x_col} LIMIT 20"
+
+            # Default fallback
+            return f"SELECT * FROM {table_name} LIMIT 10"
+
+        except Exception as e:
+            logger.error(f"Error generating chart query: {e}")
+            # Simple fallback
+            return f"SELECT * FROM {table_name} LIMIT 10"
 
 # Initialize LangChain analyzer
 langchain_analyzer = LangChainAnalyzer()
@@ -667,6 +1271,10 @@ def send_message():
         connection_info = session.get('connection_info', {})
         table_name = data_info['table_name']
 
+        chart_keywords = ['chart', 'graph', 'plot', 'visualiz', 'pie', 'bar', 'line']
+        if any(keyword in user_message.lower() for keyword in chart_keywords):
+            logger.info(f"Chart request detected: {user_message}")
+
         # Use LangChain for analysis
         ai_response = langchain_analyzer.analyze_with_langchain(
             user_message,
@@ -736,5 +1344,16 @@ def cleanup_table():
         return jsonify({'success': False, 'message': f'Cleanup failed: {str(e)}'})
 
 
+# 添加静态文件服务路由用于图表显示
+@app.route('/uploads/<filename>')
+@app.route('/chat2data/uploads/<filename>')
+def uploaded_file(filename):
+    """Serve uploaded files (including generated charts)"""
+    try:
+        return send_from_directory(app.config['UPLOAD_FOLDER'], filename)
+    except FileNotFoundError:
+        return "File not found", 404
+
+
 if __name__ == '__main__':
-    app.run(debug=True, host='0.0.0.0', port=3001)  # 改为3001端口
+    app.run(debug=True, host='0.0.0.0', port=3001)
