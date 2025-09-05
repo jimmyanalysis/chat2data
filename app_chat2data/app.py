@@ -605,8 +605,8 @@ class LangChainAnalyzer:
                     tools=all_tools,
                     verbose=True,
                     handle_parsing_errors=True,
-                    max_iterations=10,
-                    max_execution_time=60
+                    max_iterations=15,
+                    max_execution_time=180
                 )
 
                 logger.info("Successfully created React agent with chart tools")
@@ -688,119 +688,231 @@ class LangChainAnalyzer:
             traceback.print_exc()
             return None
 
-
     def analyze_with_langchain(self, user_message, table_name, connection_info):
-        """Analyze data with proper agent execution handling"""
+        """Analyze data with timeout fixes and better result handling"""
         try:
             logger.info(f"Starting analysis for message: {user_message[:100]}...")
 
-            # Build connection string
+            # Check if user wants a chart first
+            chart_keywords = ['chart', 'graph', 'plot', 'visualiz', 'pie', 'bar', 'line']
+            wants_chart = any(keyword in user_message.lower() for keyword in chart_keywords)
+
+            if wants_chart:
+                return self.handle_chart_request(user_message, table_name, connection_info)
+
+            # For simple data requests, use direct SQL execution to avoid agent timeout
+            simple_requests = ['sample', 'preview', 'show', 'first', 'top', 'example']
+            is_simple_request = any(keyword in user_message.lower() for keyword in simple_requests)
+
+            if is_simple_request:
+                logger.info("Handling as simple request with direct SQL")
+                return self.handle_simple_request(user_message, table_name, connection_info)
+
+            # Build connection string for complex queries
             if connection_info['type'] == 'default':
                 connection_string = f"mysql+pymysql://{app.config['MYSQL_USER']}:{app.config['MYSQL_PASSWORD']}@{app.config['MYSQL_HOST']}/{app.config['MYSQL_DATABASE']}"
             else:
                 connection_string = f"mysql+pymysql://{connection_info['user']}:{connection_info['password']}@{connection_info['host']}/{connection_info['database']}"
 
-            # Check if user wants a chart
-            chart_keywords = ['chart', 'graph', 'plot', 'visualiz', 'pie', 'bar', 'line']
-            wants_chart = any(keyword in user_message.lower() for keyword in chart_keywords)
-
-            if wants_chart:
-                # Handle chart requests with the separate method
-                return self.handle_chart_request(user_message, table_name, connection_info)
-
-            # Create SQL agent for regular queries
+            # Create SQL agent with shorter timeouts
             agent = self.create_basic_sql_agent(connection_string, table_name)
             if not agent:
                 return "Failed to create SQL analysis agent."
 
-            # Enhanced prompt for regular analysis
+            # Enhanced prompt for complex analysis
             enhanced_prompt = f"""
             You are analyzing data from table '{table_name}'. 
             User question: {user_message}
-    
-            Please write and execute SQL queries to answer the question and provide clear insights.
-            Focus on being helpful and providing actionable insights about the data.
+
+            Please write and execute ONE SQL query to answer the question, then provide a clear, concise answer.
+            Do NOT execute multiple queries unless absolutely necessary.
+            Focus on being direct and helpful.
             """
 
-            # Execute analysis with proper error handling
+            # Execute with shorter timeout
             try:
-                # Method 1: Try invoke (newer LangChain versions)
                 if hasattr(agent, 'invoke'):
-                    logger.info("Using invoke method")
-                    result = agent.invoke({"input": enhanced_prompt})
+                    logger.info("Using invoke method with timeout controls")
+                    result = agent.invoke(
+                        {"input": enhanced_prompt},
+                        config={"configurable": {"max_execution_time": 20, "max_iterations": 3}}
+                    )
 
-                    # Handle different result formats
                     if isinstance(result, dict):
-                        # Check for common output keys
                         if "output" in result:
                             return result["output"]
                         elif "result" in result:
                             return result["result"]
-                        elif "answer" in result:
-                            return result["answer"]
                         else:
-                            # If no standard key, try to find the actual response
-                            logger.info(f"Result keys: {list(result.keys())}")
-                            # Return the first non-metadata value
+                            # Extract the meaningful content
                             for key, value in result.items():
-                                if key not in ['intermediate_steps', 'chat_history'] and isinstance(value, str):
+                                if isinstance(value, str) and len(value) > 10:
                                     return value
                             return str(result)
                     else:
                         return str(result)
-
-                # Method 2: Try run method with error handling
-                elif hasattr(agent, 'run'):
-                    logger.info("Attempting run method")
-                    try:
-                        result = agent.run(enhanced_prompt)
-                        return result
-                    except Exception as run_error:
-                        logger.warning(f"Run method failed: {run_error}")
-                        # Try with input parameter
-                        try:
-                            result = agent.run(input=enhanced_prompt)
-                            return result
-                        except Exception as run_input_error:
-                            logger.warning(f"Run with input failed: {run_input_error}")
-                            raise run_input_error
-
-                # Method 3: Try call method (older versions)
-                elif hasattr(agent, '__call__'):
-                    logger.info("Using call method")
-                    result = agent(enhanced_prompt)
-                    if isinstance(result, dict):
-                        return result.get("output", str(result))
-                    return str(result)
-
                 else:
-                    # Method 4: Direct execution if it's an executor
-                    if hasattr(agent, 'agent') and hasattr(agent, 'tools'):
-                        logger.info("Direct executor execution")
-                        result = agent.invoke({"input": enhanced_prompt})
-                        if isinstance(result, dict):
-                            return result.get("output", str(result))
-                        return str(result)
-                    else:
-                        return "Agent has no supported execution method"
+                    return "Agent execution method not available"
 
             except Exception as exec_error:
-                logger.error(f"Analysis execution failed: {exec_error}")
-
-                # Fallback: Direct SQL execution
-                logger.info("Attempting fallback SQL execution")
-                try:
-                    return self.fallback_sql_analysis(user_message, table_name, connection_info)
-                except Exception as fallback_error:
-                    logger.error(f"Fallback also failed: {fallback_error}")
-                    return f"Analysis failed. Error: {str(exec_error)}"
+                logger.error(f"Agent execution failed: {exec_error}")
+                # Fall back to direct SQL execution
+                return self.handle_simple_request(user_message, table_name, connection_info)
 
         except Exception as e:
-            logger.error(f"LangChain analysis error: {e}")
-            import traceback
-            traceback.print_exc()
+            logger.error(f"Analysis error: {e}")
             return f"Analysis failed: {str(e)}"
 
+    def handle_simple_request(self, user_message, table_name, connection_info):
+        """Handle simple requests directly with SQL to avoid agent timeouts"""
+        try:
+            logger.info(f"Handling simple request: {user_message}")
+
+            # Get database connection
+            connection = DatabaseManager.get_connection()
+            if not connection:
+                return "Failed to connect to database"
+
+            try:
+                # Generate appropriate query based on user request
+                query = self.generate_simple_query(user_message, table_name)
+                logger.info(f"Executing query: {query}")
+
+                # Execute query
+                results, columns = DatabaseManager.execute_query(connection, query)
+                connection.close()
+
+                if not results:
+                    return f"No results found for query: {query}"
+
+                # Format results in a user-friendly way
+                return self.format_query_results(results, columns, query, user_message)
+
+            except Exception as exec_error:
+                if 'connection' in locals():
+                    connection.close()
+                logger.error(f"Simple request execution failed: {exec_error}")
+                return f"Query execution failed: {str(exec_error)}"
+
+        except Exception as e:
+            logger.error(f"Simple request handling error: {e}")
+            return f"Failed to handle request: {str(e)}"
+
+    def format_query_results(self, results, columns, query, user_message):
+        """Format query results in a readable format"""
+        try:
+            result_text = f"**Query executed:** `{query}`\n\n"
+
+            if 'count' in query.lower() and len(results) == 1 and len(results[0]) == 1:
+                # Handle COUNT queries
+                count = results[0][0]
+                result_text += f"**Result:** {count:,} records found in the table.\n"
+                return result_text
+
+            if 'describe' in query.lower():
+                # Handle DESCRIBE queries
+                result_text += "**Table Structure:**\n"
+                for row in results:
+                    field, field_type = row[0], row[1]
+                    result_text += f"- **{field}**: {field_type}\n"
+                return result_text
+
+            # Handle regular SELECT queries
+            result_text += f"**Results ({len(results)} records):**\n\n"
+
+            # Create formatted table
+            if len(results) <= 10:
+                # Show all results for small datasets
+                for i, row in enumerate(results, 1):
+                    result_text += f"**Record {i}:**\n"
+                    for col, val in zip(columns, row):
+                        # Format different data types appropriately
+                        if val is None:
+                            formatted_val = "NULL"
+                        elif isinstance(val, (int, float)):
+                            formatted_val = f"{val:,}" if isinstance(val, int) else f"{val:.2f}"
+                        elif len(str(val)) > 50:
+                            formatted_val = str(val)[:47] + "..."
+                        else:
+                            formatted_val = str(val)
+
+                        result_text += f"  - {col}: {formatted_val}\n"
+                    result_text += "\n"
+            else:
+                # Show summary for large datasets
+                result_text += f"Showing first 5 of {len(results)} records:\n\n"
+                for i, row in enumerate(results[:5], 1):
+                    result_text += f"**Record {i}:**\n"
+                    for col, val in zip(columns, row):
+                        if val is None:
+                            formatted_val = "NULL"
+                        elif isinstance(val, (int, float)):
+                            formatted_val = f"{val:,}" if isinstance(val, int) else f"{val:.2f}"
+                        elif len(str(val)) > 50:
+                            formatted_val = str(val)[:47] + "..."
+                        else:
+                            formatted_val = str(val)
+
+                        result_text += f"  - {col}: {formatted_val}\n"
+                    result_text += "\n"
+
+                result_text += f"... and {len(results) - 5} more records.\n"
+
+            # Add column summary
+            result_text += f"\n**Columns:** {', '.join(columns)}"
+
+            return result_text
+
+        except Exception as e:
+            logger.error(f"Error formatting results: {e}")
+            # Fallback to simple format
+            return f"Query: {query}\n\nResults: {len(results)} records returned\nColumns: {', '.join(columns)}"
+
+    def create_basic_sql_agent(self, connection_string, table_name):
+        """Create SQL agent with strict timeout controls"""
+        try:
+            logger.info(f"Creating SQL agent with timeout controls")
+
+            # Create SQLDatabase
+            try:
+                from langchain_community.utilities import SQLDatabase
+            except ImportError:
+                from langchain.sql_database import SQLDatabase
+
+            db = SQLDatabase.from_uri(connection_string)
+
+            # Create toolkit
+            try:
+                from langchain_community.agent_toolkits.sql.toolkit import SQLDatabaseToolkit
+            except ImportError:
+                from langchain.agents.agent_toolkits import SQLDatabaseToolkit
+
+            toolkit = SQLDatabaseToolkit(db=db, llm=self.llm)
+
+            # Create agent with very strict limits
+            try:
+                from langchain.agents import create_sql_agent
+
+                agent = create_sql_agent(
+                    llm=self.llm,
+                    toolkit=toolkit,
+                    verbose=True,
+                    handle_parsing_errors=True,
+                    max_iterations=2,  # Very limited iterations
+                    max_execution_time=15,  # Short timeout
+                    early_stopping_method="generate"  # Stop early when possible
+                )
+
+                logger.info("SQL agent created with timeout controls")
+                return agent
+
+            except Exception as agent_error:
+                logger.error(f"Agent creation failed: {agent_error}")
+                return None
+
+        except Exception as e:
+            logger.error(f"SQL agent creation error: {e}")
+            return None
 
     def fallback_sql_analysis(self, user_message, table_name, connection_info):
         """Fallback method for direct SQL analysis when agent fails"""
@@ -866,6 +978,28 @@ class LangChainAnalyzer:
             logger.error(f"Fallback analysis failed: {e}")
             return f"Fallback analysis failed: {str(e)}"
 
+    def generate_simple_query(self, user_message, table_name):
+        """Generate SQL query for simple requests"""
+        message_lower = user_message.lower()
+
+        # Extract number if mentioned
+        import re
+        numbers = re.findall(r'\d+', user_message)
+        limit = int(numbers[0]) if numbers else 5
+
+        # Keep reasonable limits
+        limit = min(limit, 50)
+
+        if any(word in message_lower for word in ['sample', 'example', 'show', 'preview']):
+            return f"SELECT * FROM {table_name} LIMIT {limit}"
+        elif any(word in message_lower for word in ['first', 'top']):
+            return f"SELECT * FROM {table_name} LIMIT {limit}"
+        elif any(word in message_lower for word in ['count', 'total', 'how many']):
+            return f"SELECT COUNT(*) as total_records FROM {table_name}"
+        elif any(word in message_lower for word in ['columns', 'structure', 'schema']):
+            return f"DESCRIBE {table_name}"
+        else:
+            return f"SELECT * FROM {table_name} LIMIT {limit}"
 
     def create_basic_sql_agent(self, connection_string, table_name):
         """Create basic SQL agent with improved error handling"""
@@ -898,8 +1032,8 @@ class LangChainAnalyzer:
                     toolkit=toolkit,
                     verbose=True,
                     handle_parsing_errors=True,
-                    max_iterations=3,  # Reduced to avoid timeouts
-                    max_execution_time=30
+                    max_iterations=10,  # Reduced to avoid timeouts
+                    max_execution_time=120
                 )
 
                 logger.info("Basic SQL agent created successfully")
