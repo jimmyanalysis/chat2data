@@ -77,7 +77,9 @@ flask-data-analyzer/
 ├── templates/             # HTML templates
 │   ├── index.html         # Homepage template
 │   └── chat.html          # Chat interface template
-
+└── tools/                 # Utility scripts (optional)
+    ├── csv_preprocessor.py  # CSV preprocessing tool
+    └── debug_csv_import.py  # Debug script for CSV issues
 ```
 
 ## Dependencies
