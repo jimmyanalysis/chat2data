@@ -1,5 +1,4 @@
-
-<!-- templates/chat.html - Chat Page -->
+<!-- templates/chat.html - Enhanced Chat Page -->
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -35,12 +34,43 @@
             font-size: 1.8em;
         }
 
+        .header-controls {
+            display: flex;
+            gap: 15px;
+            align-items: center;
+        }
+
         .data-summary {
             background: #f8f9ff;
             padding: 10px 15px;
             border-radius: 20px;
             font-size: 0.9em;
             color: #666;
+        }
+
+        .table-info {
+            background: #e8f4fd;
+            padding: 8px 12px;
+            border-radius: 15px;
+            font-size: 0.8em;
+            color: #0066cc;
+            border: 1px solid #b3d9ff;
+        }
+
+        .cleanup-btn {
+            background: #ff6b6b;
+            color: white;
+            padding: 8px 15px;
+            border: none;
+            border-radius: 15px;
+            cursor: pointer;
+            font-size: 0.8em;
+            transition: all 0.3s ease;
+        }
+
+        .cleanup-btn:hover {
+            background: #ff5252;
+            transform: translateY(-1px);
         }
 
         .chat-container {
@@ -100,6 +130,16 @@
             margin-top: 5px;
         }
 
+        .table-name-badge {
+            background: #4CAF50;
+            color: white;
+            padding: 3px 8px;
+            border-radius: 10px;
+            font-size: 0.7em;
+            margin-bottom: 5px;
+            display: inline-block;
+        }
+
         .input-area {
             background: white;
             border-radius: 15px;
@@ -117,10 +157,19 @@
             font-size: 16px;
             outline: none;
             transition: border-color 0.3s ease;
+            min-height: 50px;
+            resize: vertical;
+            max-height: 120px;
         }
 
         .message-input:focus {
             border-color: #667eea;
+        }
+
+        .input-controls {
+            display: flex;
+            flex-direction: column;
+            gap: 5px;
         }
 
         .send-btn {
@@ -142,6 +191,27 @@
         .send-btn:disabled {
             opacity: 0.5;
             cursor: not-allowed;
+        }
+
+        .quick-actions {
+            display: flex;
+            gap: 5px;
+            flex-wrap: wrap;
+        }
+
+        .quick-btn {
+            background: #f0f0f0;
+            border: 1px solid #ddd;
+            padding: 5px 10px;
+            border-radius: 15px;
+            font-size: 0.7em;
+            cursor: pointer;
+            transition: all 0.2s ease;
+        }
+
+        .quick-btn:hover {
+            background: #667eea;
+            color: white;
         }
 
         .typing {
@@ -194,15 +264,71 @@
             background: #667eea;
             color: white;
         }
+
+        .sql-code {
+            background: #2d3748;
+            color: #a0aec0;
+            padding: 15px;
+            border-radius: 8px;
+            margin: 10px 0;
+            font-family: 'Courier New', monospace;
+            overflow-x: auto;
+        }
+
+        .result-table {
+            border-collapse: collapse;
+            width: 100%;
+            margin: 10px 0;
+        }
+
+        .result-table th, .result-table td {
+            border: 1px solid #ddd;
+            padding: 8px;
+            text-align: left;
+        }
+
+        .result-table th {
+            background: #f2f2f2;
+        }
+
+        .status-indicator {
+            position: fixed;
+            top: 20px;
+            right: 20px;
+            padding: 10px 15px;
+            border-radius: 20px;
+            color: white;
+            font-size: 0.8em;
+            opacity: 0;
+            transition: opacity 0.3s ease;
+        }
+
+        .status-indicator.success {
+            background: #4CAF50;
+        }
+
+        .status-indicator.error {
+            background: #f44336;
+        }
+
+        .status-indicator.show {
+            opacity: 1;
+        }
     </style>
 </head>
 <body>
     <div class="header">
         <h1>📊 Data Analysis Chat</h1>
-        <div style="display: flex; gap: 15px; align-items: center;">
+        <div class="header-controls">
             <div class="data-summary" id="dataSummary">
                 Loading...
             </div>
+            <div class="table-info" id="tableInfo" style="display: none;">
+                Table: <span id="tableName"></span>
+            </div>
+            <button class="cleanup-btn" id="cleanupBtn" onclick="cleanupTable()" style="display: none;">
+                🗑️ Cleanup
+            </button>
             <a href="/" class="back-btn">Back to Home</a>
         </div>
     </div>
@@ -211,22 +337,29 @@
         <div class="messages" id="messages">
             <div class="message ai-message">
                 <div class="message-content">
-                    Hello! I'm your data analysis assistant. I've loaded your data and can help you analyze it, answer questions, or generate chart suggestions.
+                    🤖 Hello! I'm your LangChain-powered data analysis assistant. I've loaded your data into a MySQL table and can help you analyze it using SQL queries.
                     <br><br>
-                    You can ask me about:
-                    <br>• Basic statistics of your data
-                    <br>• Finding data with specific conditions
-                    <br>• Data visualization recommendations
-                    <br>• Trend analysis
+                    <strong>What I can do:</strong>
+                    <br>• Execute complex SQL queries on your data
+                    <br>• Provide statistical analysis and insights
+                    <br>• Generate data visualization recommendations
+                    <br>• Answer questions about trends and patterns
+                    <br>• Perform data quality checks
                     <br><br>
-                    What would you like to know?
+                    <strong>Try asking:</strong>
+                    <br>• "Show me the first 10 rows"
+                    <br>• "What are the basic statistics?"
+                    <br>• "Find duplicates in my data"
+                    <br>• "Show me trends over time"
+                    <br><br>
+                    What would you like to explore?
                 </div>
             </div>
         </div>
 
         <div class="typing" id="typing">
             <div class="typing-content">
-                AI is thinking
+                🤖 LangChain Agent is analyzing
                 <div class="typing-dots">
                     <span></span>
                     <span></span>
@@ -236,19 +369,30 @@
         </div>
 
         <div class="input-area">
-            <input
-                type="text"
+            <textarea
                 class="message-input"
                 id="messageInput"
-                placeholder="Type your question..."
-                maxlength="500"
-            >
-            <button class="send-btn" id="sendBtn" onclick="sendMessage()">➤</button>
+                placeholder="Ask me anything about your data..."
+                maxlength="1000"
+                rows="1"
+            ></textarea>
+            <div class="input-controls">
+                <button class="send-btn" id="sendBtn" onclick="sendMessage()">➤</button>
+                <div class="quick-actions">
+                    <button class="quick-btn" onclick="quickQuery('Show me basic statistics')">📊 Stats</button>
+                    <button class="quick-btn" onclick="quickQuery('Show first 10 rows')">👀 Preview</button>
+                    <button class="quick-btn" onclick="quickQuery('Check for missing values')">🔍 Missing</button>
+                    <button class="quick-btn" onclick="quickQuery('Find duplicates')">🔄 Duplicates</button>
+                </div>
+            </div>
         </div>
     </div>
 
+    <div class="status-indicator" id="statusIndicator"></div>
+
     <script>
         let isLoading = false;
+        let currentTableName = '';
 
         // Load data summary when page loads
         window.addEventListener('load', function() {
@@ -256,12 +400,22 @@
                 .then(response => response.json())
                 .then(data => {
                     if (data.success) {
-                        const summary = `${data.data_info.shape[0]} rows × ${data.data_info.shape[1]} cols | ${data.data_info.columns.slice(0, 3).join(', ')}${data.data_info.columns.length > 3 ? '...' : ''}`;
+                        const dataInfo = data.data_info;
+                        const summary = `${dataInfo.shape[0]} rows × ${dataInfo.shape[1]} cols | ${dataInfo.columns.slice(0, 3).join(', ')}${dataInfo.columns.length > 3 ? '...' : ''}`;
                         document.getElementById('dataSummary').textContent = summary;
+
+                        // Show table info if it's a CSV import
+                        if (dataInfo.type === 'csv_import') {
+                            currentTableName = dataInfo.table_name;
+                            document.getElementById('tableName').textContent = currentTableName;
+                            document.getElementById('tableInfo').style.display = 'block';
+                            document.getElementById('cleanupBtn').style.display = 'block';
+                        }
                     }
                 })
                 .catch(error => {
                     document.getElementById('dataSummary').textContent = 'Data loading failed';
+                    showStatus('Failed to load data summary', 'error');
                 });
         });
 
@@ -275,6 +429,7 @@
             // Display user message
             addMessage(message, 'user');
             input.value = '';
+            autoResizeTextarea(input);
 
             // Show loading state
             showTyping();
@@ -293,14 +448,17 @@
             .then(data => {
                 hideTyping();
                 if (data.success) {
-                    addMessage(data.response, 'ai', data.timestamp);
+                    addMessage(data.response, 'ai', data.timestamp, data.table_name);
+                    showStatus('Analysis completed', 'success');
                 } else {
                     addMessage('Sorry, an error occurred while processing your request: ' + data.message, 'ai');
+                    showStatus('Analysis failed', 'error');
                 }
             })
             .catch(error => {
                 hideTyping();
                 addMessage('Network error, please try again later.', 'ai');
+                showStatus('Network error', 'error');
             })
             .finally(() => {
                 isLoading = false;
@@ -308,8 +466,14 @@
             });
         }
 
+        // Quick query function
+        function quickQuery(query) {
+            document.getElementById('messageInput').value = query;
+            sendMessage();
+        }
+
         // Add message to chat interface
-        function addMessage(content, type, timestamp) {
+        function addMessage(content, type, timestamp, tableName) {
             const messagesContainer = document.getElementById('messages');
             const messageDiv = document.createElement('div');
             messageDiv.className = `message ${type}-message`;
@@ -320,15 +484,41 @@
                 second: '2-digit'
             });
 
+            let tableBadge = '';
+            if (type === 'ai' && tableName) {
+                tableBadge = `<div class="table-name-badge">Table: ${tableName}</div>`;
+            }
+
+            // Format content for better display
+            const formattedContent = formatMessageContent(content, type);
+
             messageDiv.innerHTML = `
                 <div class="message-content">
-                    ${content}
+                    ${tableBadge}
+                    ${formattedContent}
                     <div class="message-time">${now}</div>
                 </div>
             `;
 
             messagesContainer.appendChild(messageDiv);
             messagesContainer.scrollTop = messagesContainer.scrollHeight;
+        }
+
+        // Format message content
+        function formatMessageContent(content, type) {
+            if (type === 'ai') {
+                // Format SQL code blocks
+                content = content.replace(/```sql\n([\s\S]*?)\n```/g, '<div class="sql-code">$1</div>');
+                content = content.replace(/```\n([\s\S]*?)\n```/g, '<div class="sql-code">$1</div>');
+
+                // Format bold text
+                content = content.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>');
+
+                // Format line breaks
+                content = content.replace(/\n/g, '<br>');
+            }
+
+            return content;
         }
 
         // Show typing state
@@ -342,7 +532,52 @@
             document.getElementById('typing').style.display = 'none';
         }
 
-        // Send message on Enter key
+        // Show status indicator
+        function showStatus(message, type) {
+            const indicator = document.getElementById('statusIndicator');
+            indicator.textContent = message;
+            indicator.className = `status-indicator ${type} show`;
+
+            setTimeout(() => {
+                indicator.classList.remove('show');
+            }, 3000);
+        }
+
+        // Auto-resize textarea
+        function autoResizeTextarea(textarea) {
+            textarea.style.height = 'auto';
+            textarea.style.height = Math.min(textarea.scrollHeight, 120) + 'px';
+        }
+
+        // Cleanup table
+        function cleanupTable() {
+            if (!confirm('Are you sure you want to delete the imported table? This action cannot be undone.')) {
+                return;
+            }
+
+            fetch('/cleanup_table', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                }
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.success) {
+                    showStatus('Table cleaned up successfully', 'success');
+                    setTimeout(() => {
+                        window.location.href = '/';
+                    }, 1500);
+                } else {
+                    showStatus('Cleanup failed: ' + data.message, 'error');
+                }
+            })
+            .catch(error => {
+                showStatus('Cleanup failed', 'error');
+            });
+        }
+
+        // Send message on Enter key (Shift+Enter for new line)
         document.getElementById('messageInput').addEventListener('keypress', function(e) {
             if (e.key === 'Enter' && !e.shiftKey) {
                 e.preventDefault();
@@ -352,8 +587,16 @@
 
         // Auto-adjust input height
         document.getElementById('messageInput').addEventListener('input', function(e) {
-            this.style.height = 'auto';
-            this.style.height = Math.min(this.scrollHeight, 120) + 'px';
+            autoResizeTextarea(this);
+        });
+
+        // Prevent form submission on enter
+        document.addEventListener('keydown', function(e) {
+            if (e.key === 'Enter' && e.target.tagName === 'TEXTAREA') {
+                if (!e.shiftKey) {
+                    e.preventDefault();
+                }
+            }
         });
     </script>
 </body>

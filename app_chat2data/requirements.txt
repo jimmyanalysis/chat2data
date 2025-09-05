@@ -5,3 +5,17 @@ openai==0.28.1
 Werkzeug==2.3.7
 python-dotenv==1.0.0
 numpy
+chardet
+openpyxl
+
+# LangChain dependencies
+langchain
+langchain-experimental
+langchain-community
+SQLAlchemy==2.0.23
+PyMySQL==1.1.0
+
+# Additional utilities
+xlrd==2.0.1
+uuid==1.30
+logging==0.4.9.6

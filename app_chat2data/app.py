@@ -4,11 +4,19 @@ import pandas as pd
 import mysql.connector
 import os
 import json
-import openai
-from datetime import datetime
 import uuid
 import logging
+import re
+from datetime import datetime
+from dateutil import parser as dateutil_parser
 from config import Config
+
+# LangChain imports
+from langchain.agents import create_sql_agent
+from langchain.agents.agent_toolkits import SQLDatabaseToolkit
+from langchain.sql_database import SQLDatabase
+from langchain.llms import OpenAI
+from langchain.memory import ConversationBufferMemory
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -20,24 +28,270 @@ app.config.from_object(Config)
 # Ensure upload directory exists
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 
-# Set OpenAI API key
-openai.api_key = app.config['OPENAI_API_KEY']
-
 
 def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in {'csv', 'xlsx', 'xls'}
 
 
+def detect_csv_encoding(file_path):
+    """Detect CSV file encoding with multiple fallbacks"""
+    encodings_to_try = [
+        'utf-8', 'utf-8-sig', 'gbk', 'gb2312', 'gb18030',
+        'big5', 'latin1', 'cp1252', 'iso-8859-1', 'windows-1252'
+    ]
+
+    # Try chardet first
+    try:
+        import chardet
+        with open(file_path, 'rb') as f:
+            raw_data = f.read(10000)
+            detected = chardet.detect(raw_data)
+            if detected['confidence'] > 0.7:
+                return detected['encoding']
+    except ImportError:
+        logger.warning("chardet not available, using fallback detection")
+    except Exception as e:
+        logger.warning(f"chardet detection failed: {e}")
+
+    # Try encodings one by one
+    for encoding in encodings_to_try:
+        try:
+            with open(file_path, 'r', encoding=encoding) as f:
+                f.read(1000)  # Try to read first 1000 chars
+            return encoding
+        except UnicodeDecodeError:
+            continue
+        except Exception:
+            continue
+
+    return 'latin1'  # Last resort
+
+
+def read_csv_safe(file_path):
+    """Safely read CSV with encoding detection"""
+    encoding = detect_csv_encoding(file_path)
+    logger.info(f"Using encoding: {encoding}")
+
+    try:
+        df = pd.read_csv(file_path, encoding=encoding)
+        return df, encoding
+    except Exception as e:
+        logger.error(f"Failed to read CSV: {e}")
+        # Last resort: read with errors ignored
+        df = pd.read_csv(file_path, encoding='latin1', errors='ignore')
+        return df, 'latin1 (with errors ignored)'
+
+
+def clean_column_names(columns):
+    """Clean column names for MySQL compatibility"""
+    clean_cols = []
+    for i, col in enumerate(columns):
+        # Remove/replace problematic characters
+        clean_col = str(col).strip()
+        clean_col = clean_col.replace(' ', '_').replace('-', '_')
+        clean_col = clean_col.replace('(', '').replace(')', '')
+        clean_col = clean_col.replace('[', '').replace(']', '')
+        clean_col = clean_col.replace('.', '_').replace(',', '_')
+        clean_col = clean_col.replace('/', '_').replace('\\', '_')
+        clean_col = clean_col.replace('&', 'and').replace('%', 'percent')
+        clean_col = clean_col.replace('#', 'num').replace('@', 'at')
+        clean_col = clean_col.replace('$', 'dollar').replace('!', '')
+        clean_col = clean_col.replace('?', '').replace('*', '')
+        clean_col = clean_col.replace('+', 'plus').replace('=', 'eq')
+        clean_col = clean_col.replace('<', 'lt').replace('>', 'gt')
+        clean_col = clean_col.replace('|', '_').replace(';', '_')
+        clean_col = clean_col.replace(':', '_').replace('"', '')
+        clean_col = clean_col.replace("'", '').replace('`', '')
+
+        # Remove non-ASCII characters
+        clean_col = clean_col.encode('ascii', 'ignore').decode('ascii')
+
+        # Ensure not empty
+        if not clean_col or clean_col == '_':
+            clean_col = f"column_{i + 1}"
+
+        # Handle duplicates
+        original_clean = clean_col
+        counter = 1
+        while clean_col in clean_cols:
+            clean_col = f"{original_clean}_{counter}"
+            counter += 1
+
+        clean_cols.append(clean_col)
+
+    return clean_cols
+
+
+def smart_date_parser(date_string):
+    """
+    Smart date parser using dateutil.parser with fallbacks
+    Returns standardized datetime string or None if parsing fails
+    """
+    if pd.isna(date_string) or str(date_string).strip() == '':
+        return None
+
+    date_str = str(date_string).strip()
+
+    try:
+        # Use dateutil parser - it handles most date formats automatically
+        parsed_date = dateutil_parser.parse(date_str)
+        # Return in MySQL-compatible format
+        return parsed_date.strftime('%Y-%m-%d %H:%M:%S')
+    except (ValueError, TypeError, dateutil_parser.ParserError):
+        # If dateutil fails, try some common problematic formats manually
+
+        # Handle dates with 0:00 time (your specific issue)
+        if re.match(r'^\d{1,2}/\d{1,2}/\d{4}\s+0:00$', date_str):
+            try:
+                # Parse as MM/DD/YYYY format and add default time
+                date_part = date_str.split()[0]
+                parsed_date = datetime.strptime(date_part, '%m/%d/%Y')
+                return parsed_date.strftime('%Y-%m-%d %H:%M:%S')
+            except:
+                pass
+
+        # Handle dates without time
+        if re.match(r'^\d{1,2}/\d{1,2}/\d{4}$', date_str):
+            try:
+                parsed_date = datetime.strptime(date_str, '%m/%d/%Y')
+                return parsed_date.strftime('%Y-%m-%d %H:%M:%S')
+            except:
+                pass
+
+        # Handle Excel-style dates with .0 decimals
+        if re.match(r'^\d{1,2}/\d{1,2}/\d{4}\s+\d{1,2}:\d{2}\.0$', date_str):
+            try:
+                # Remove the .0 and parse
+                clean_date = date_str.replace('.0', '')
+                parsed_date = dateutil_parser.parse(clean_date)
+                return parsed_date.strftime('%Y-%m-%d %H:%M:%S')
+            except:
+                pass
+
+        # Last resort: try pandas to_datetime
+        try:
+            parsed_date = pd.to_datetime(date_str, errors='raise')
+            return parsed_date.strftime('%Y-%m-%d %H:%M:%S')
+        except:
+            logger.warning(f"Failed to parse date: '{date_string}'")
+            return None
+
+
+def process_date_values(df):
+    """Process and standardize date columns using smart date parser"""
+    date_columns = []
+    conversion_stats = {}
+
+    for col in df.columns:
+        # Check if column looks like a date column
+        col_lower = col.lower()
+        date_keywords = ['date', 'time', 'timestamp', 'created', 'updated', 'modified', 'birth', 'expire']
+
+        looks_like_date = any(keyword in col_lower for keyword in date_keywords)
+
+        # Also check if values look like dates
+        if not looks_like_date:
+            sample_values = df[col].dropna().head(10)
+            if len(sample_values) > 0:
+                date_like_count = 0
+                for val in sample_values:
+                    val_str = str(val).strip()
+                    # Check for date-like patterns
+                    if (re.search(r'\d{1,4}[/-]\d{1,2}[/-]\d{2,4}', val_str) or
+                            re.search(r'\d{4}-\d{2}-\d{2}', val_str) or
+                            re.search(r'\d{1,2}:\d{2}', val_str)):
+                        date_like_count += 1
+
+                if date_like_count / len(sample_values) > 0.6:
+                    looks_like_date = True
+
+        if looks_like_date:
+            logger.info(f"Processing potential date column: {col}")
+            original_values = df[col].copy()
+
+            # Use smart date parser for all values
+            converted_values = []
+            successful_conversions = 0
+            total_non_null = original_values.notna().sum()
+
+            for value in original_values:
+                parsed_date = smart_date_parser(value)
+                if parsed_date:
+                    converted_values.append(parsed_date)
+                    successful_conversions += 1
+                else:
+                    # Keep original value as string if parsing fails
+                    converted_values.append(str(value) if pd.notna(value) else '')
+
+            # Calculate success rate
+            success_rate = successful_conversions / total_non_null if total_non_null > 0 else 0
+
+            if success_rate > 0.7:  # If more than 70% successful
+                df[col] = converted_values
+                date_columns.append(col)
+                conversion_stats[col] = {
+                    'method': 'dateutil_parser',
+                    'success_rate': success_rate,
+                    'converted': successful_conversions,
+                    'total': total_non_null
+                }
+                logger.info(f"Successfully converted '{col}': {successful_conversions}/{total_non_null} values")
+            else:
+                # Keep original values if conversion rate is too low
+                logger.warning(f"Low conversion rate for '{col}' ({success_rate:.2f}), keeping as text")
+                df[col] = original_values.astype(str).fillna('')
+                conversion_stats[col] = {
+                    'method': 'failed',
+                    'success_rate': success_rate,
+                    'converted': successful_conversions,
+                    'total': total_non_null
+                }
+
+    return df, date_columns, conversion_stats
+
+
+def infer_mysql_type(series, column_name):
+    """Infer MySQL column type from pandas series with improved date handling"""
+    if series.empty:
+        return "TEXT"
+
+    # Remove nulls for type checking
+    non_null_series = series.dropna()
+    if non_null_series.empty:
+        return "TEXT"
+
+    # Check data types
+    if non_null_series.dtype in ['int64', 'int32', 'int16', 'int8']:
+        return "INT"
+    elif non_null_series.dtype in ['float64', 'float32']:
+        return "DECIMAL(15,4)"
+    else:
+        # For all other types including dates, use TEXT to avoid format issues
+        # This is safer than trying to use DATETIME columns
+        try:
+            max_length = non_null_series.astype(str).str.len().max()
+            if max_length <= 50:
+                return "VARCHAR(100)"
+            elif max_length <= 255:
+                return "VARCHAR(500)"
+            elif max_length <= 65535:
+                return "TEXT"
+            else:
+                return "LONGTEXT"
+        except:
+            return "TEXT"
+
+
 class DatabaseManager:
     @staticmethod
-    def get_connection(host, user, password, database):
-        """Create database connection"""
+    def get_connection():
+        """Create database connection to default MySQL database"""
         try:
             connection = mysql.connector.connect(
-                host=host,
-                user=user,
-                password=password,
-                database=database,
+                host=app.config['MYSQL_HOST'],
+                user=app.config['MYSQL_USER'],
+                password=app.config['MYSQL_PASSWORD'],
+                database=app.config['MYSQL_DATABASE'],
                 charset='utf8mb4'
             )
             return connection
@@ -47,42 +301,126 @@ class DatabaseManager:
 
     @staticmethod
     def csv_to_mysql(csv_file, connection):
-        """Import CSV data to MySQL"""
+        """Import CSV data to MySQL with improved error handling"""
         try:
-            # Read CSV file
-            df = pd.read_csv(csv_file, encoding='utf-8')
+            # Read CSV with encoding detection
+            df, encoding_used = read_csv_safe(csv_file)
+            logger.info(f"Read CSV with {len(df)} rows and {len(df.columns)} columns using {encoding_used}")
+
+            if df.empty:
+                return {"success": False, "error": "CSV file is empty"}
 
             # Clean column names
-            df.columns = [col.strip().replace(' ', '_').replace('-', '_') for col in df.columns]
+            original_columns = df.columns.tolist()
+            clean_columns = clean_column_names(df.columns)
+            df.columns = clean_columns
 
-            # Generate unique table name
-            table_name = f"user_data_{uuid.uuid4().hex[:8]}"
+            logger.info(f"Column mapping: {dict(zip(original_columns, clean_columns))}")
 
+            # IMPORTANT: Process date columns BEFORE creating the table
+            df_processed, date_columns, conversion_stats = process_date_values(df)
+
+            if date_columns:
+                logger.info(f"Successfully processed date columns: {date_columns}")
+                for col, stats in conversion_stats.items():
+                    if stats['success_rate'] > 0:
+                        logger.info(
+                            f"  {col}: {stats['method']} - {stats['converted']}/{stats['total']} values converted")
+            else:
+                logger.info("No date columns found or processed")
+
+            # Generate table name
+            table_name = f"ana_{uuid.uuid4().hex[:8]}"
+
+            # Create table
             cursor = connection.cursor()
 
-            # Generate CREATE TABLE statement
-            columns = []
-            for col in df.columns:
-                columns.append(f"`{col}` TEXT")
+            # Build CREATE TABLE statement using processed DataFrame
+            column_defs = []
+            for col in df_processed.columns:
+                col_type = infer_mysql_type(df_processed[col], col)
+                column_defs.append(f"`{col}` {col_type}")
 
-            create_table_sql = f"CREATE TABLE {table_name} ({', '.join(columns)})"
-            cursor.execute(create_table_sql)
+            create_sql = f"""
+            CREATE TABLE {table_name} (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                {', '.join(column_defs)}
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+            """
 
-            # Batch insert data
-            insert_sql = f"INSERT INTO {table_name} ({', '.join([f'`{col}`' for col in df.columns])}) VALUES ({', '.join(['%s'] * len(df.columns))})"
+            cursor.execute(create_sql)
+            logger.info(f"Created table: {table_name}")
 
-            data_to_insert = []
-            for index, row in df.iterrows():
-                data_to_insert.append(tuple(str(val) if pd.notna(val) else None for val in row))
+            # Insert data in chunks using processed DataFrame
+            chunk_size = 1000
+            total_inserted = 0
 
-            cursor.executemany(insert_sql, data_to_insert)
+            insert_sql = f"""
+            INSERT INTO {table_name} ({', '.join([f'`{col}`' for col in df_processed.columns])}) 
+            VALUES ({', '.join(['%s'] * len(df_processed.columns))})
+            """
+
+            for start_idx in range(0, len(df_processed), chunk_size):
+                end_idx = min(start_idx + chunk_size, len(df_processed))
+                chunk = df_processed.iloc[start_idx:end_idx]
+
+                # Prepare data with careful handling of different types
+                data_rows = []
+                for _, row in chunk.iterrows():
+                    processed_row = []
+                    for col_name, val in zip(df_processed.columns, row):
+                        if pd.isna(val) or val == '' or str(val).strip() == '':
+                            processed_row.append(None)
+                        elif isinstance(val, (int, float)) and not pd.isna(val):
+                            # Keep numeric values as they are
+                            processed_row.append(val)
+                        else:
+                            # For all other values including processed dates, convert to string
+                            str_val = str(val).strip()
+                            # Truncate very long strings to avoid MySQL errors
+                            if len(str_val) > 65535:
+                                str_val = str_val[:65535]
+                            processed_row.append(str_val)
+                    data_rows.append(tuple(processed_row))
+
+                try:
+                    cursor.executemany(insert_sql, data_rows)
+                    total_inserted += len(data_rows)
+                    logger.info(f"Inserted chunk {start_idx}-{end_idx} ({total_inserted}/{len(df_processed)})")
+                except mysql.connector.Error as e:
+                    logger.error(f"Error inserting chunk {start_idx}-{end_idx}: {e}")
+                    # Try inserting row by row to identify problematic rows
+                    successful_rows = 0
+                    for i, row_data in enumerate(data_rows):
+                        try:
+                            cursor.execute(insert_sql, row_data)
+                            successful_rows += 1
+                        except mysql.connector.Error as row_error:
+                            logger.error(f"Error in row {start_idx + i}: {row_error}")
+                            logger.error(f"Problematic data: {dict(zip(df_processed.columns, row_data))}")
+                            continue
+                    total_inserted += successful_rows
+                    logger.info(f"Inserted {successful_rows}/{len(data_rows)} rows from chunk {start_idx}-{end_idx}")
+
             connection.commit()
             cursor.close()
 
-            return table_name, len(df)
+            logger.info(f"Successfully imported {len(df_processed)} rows to table {table_name}")
+            return {
+                "success": True,
+                "table_name": table_name,
+                "row_count": len(df_processed),
+                "encoding": encoding_used,
+                "columns": clean_columns,
+                "date_columns": date_columns,
+                "conversion_stats": conversion_stats
+            }
+
         except Exception as e:
             logger.error(f"CSV import error: {e}")
-            return None, str(e)
+            import traceback
+            traceback.print_exc()
+            return {"success": False, "error": str(e)}
 
     @staticmethod
     def execute_query(connection, query, params=None):
@@ -105,61 +443,102 @@ class DatabaseManager:
             logger.error(f"Query execution error: {e}")
             return None, str(e)
 
-
-class AIAnalyzer:
     @staticmethod
-    def analyze_with_openai(user_message, data_info, sample_data):
-        """Analyze data using OpenAI"""
+    def get_table_schema(connection, table_name):
+        """Get table schema information"""
         try:
-            # Build system prompt
-            system_prompt = f"""
-            You are a professional data analysis assistant. The user has a dataset with the following information:
+            cursor = connection.cursor()
+            cursor.execute(f"DESCRIBE {table_name}")
+            schema = cursor.fetchall()
+            cursor.close()
+            return schema
+        except Exception as e:
+            logger.error(f"Schema fetch error: {e}")
+            return None
 
-            Basic data information:
-            - Number of rows: {data_info.get('shape', ['Unknown', 'Unknown'])[0]}
-            - Number of columns: {data_info.get('shape', ['Unknown', 'Unknown'])[1]}
-            - Column names: {', '.join(data_info.get('columns', []))}
 
-            Sample data (first 3 rows):
-            {json.dumps(sample_data[:3], ensure_ascii=False, indent=2)}
+class LangChainAnalyzer:
+    def __init__(self):
+        self.llm = OpenAI(
+            openai_api_key=app.config['OPENAI_API_KEY'],
+            temperature=0,
+            model_name="gpt-3.5-turbo-instruct"
+        )
+        self.memory = ConversationBufferMemory(
+            memory_key="chat_history",
+            return_messages=True
+        )
 
-            Please provide professional data analysis advice based on the user's question. If database queries are needed, provide corresponding SQL statements.
-            Use {data_info.get('table_name', 'TABLE_NAME')} as the table name in SQL statements.
+    def create_sql_agent(self, connection_string, table_name):
+        """Create SQL agent with LangChain"""
+        try:
+            db = SQLDatabase.from_uri(connection_string)
+            toolkit = SQLDatabaseToolkit(db=db, llm=self.llm)
 
-            Requirements:
-            1. Provide clear, professional analysis advice
-            2. If SQL queries are involved, give complete SQL statements
-            3. Explain analysis approach and methods
-            4. If possible, provide data visualization suggestions
-            """
-
-            response = openai.ChatCompletion.create(
-                model=app.config['OPENAI_MODEL'],
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_message}
-                ],
-                max_tokens=1500,
-                temperature=0.7
+            agent_executor = create_sql_agent(
+                llm=self.llm,
+                toolkit=toolkit,
+                verbose=True,
+                agent_type="zero-shot-react-description",
+                memory=self.memory,
+                handle_parsing_errors=True
             )
 
-            return response.choices[0].message.content
+            return agent_executor
+        except Exception as e:
+            logger.error(f"SQL Agent creation error: {e}")
+            return None
+
+    def analyze_with_langchain(self, user_message, table_name, connection_info):
+        """Analyze data using LangChain SQL agent"""
+        try:
+            # Build connection string
+            if connection_info['type'] == 'default':
+                connection_string = f"mysql+pymysql://{app.config['MYSQL_USER']}:{app.config['MYSQL_PASSWORD']}@{app.config['MYSQL_HOST']}/{app.config['MYSQL_DATABASE']}"
+            else:
+                connection_string = f"mysql+pymysql://{connection_info['user']}:{connection_info['password']}@{connection_info['host']}/{connection_info['database']}"
+
+            # Create SQL agent
+            agent = self.create_sql_agent(connection_string, table_name)
+            if not agent:
+                return "Failed to create SQL analysis agent."
+
+            # Enhanced prompt
+            enhanced_prompt = f"""
+            You are analyzing data from table '{table_name}'. 
+            User question: {user_message}
+
+            Please:
+            1. Write and execute appropriate SQL queries to answer the question
+            2. Provide clear insights based on the results
+            3. If creating visualizations, suggest appropriate chart types
+            4. Explain your analysis process
+
+            Focus on being helpful and providing actionable insights.
+            """
+
+            # Execute analysis
+            result = agent.run(enhanced_prompt)
+            return result
 
         except Exception as e:
-            logger.error(f"OpenAI analysis error: {e}")
-            return f"AI analysis service temporarily unavailable: {str(e)}"
+            logger.error(f"LangChain analysis error: {e}")
+            return f"Analysis failed: {str(e)}"
 
 
-# Route definitions
+# Initialize LangChain analyzer
+langchain_analyzer = LangChainAnalyzer()
+
+
+# Routes
 @app.route('/')
 def index():
-    """Homepage"""
     return render_template('index.html')
 
 
 @app.route('/upload', methods=['POST'])
 def upload_file():
-    """Handle file upload"""
+    """Handle file upload and import to MySQL"""
     try:
         if 'file' not in request.files:
             return jsonify({'success': False, 'message': 'No file provided'})
@@ -173,116 +552,72 @@ def upload_file():
             filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
             file.save(filepath)
 
-            # Read file to get basic information
-            if filename.endswith('.csv'):
-                # Try multiple encodings for CSV
-                encodings_to_try = ['utf-8', 'utf-8-sig', 'gbk', 'gb2312', 'big5', 'latin1', 'cp1252', 'iso-8859-1']
-                df = None
-                encoding_used = None
+            # Get database connection
+            connection = DatabaseManager.get_connection()
+            if not connection:
+                return jsonify({'success': False, 'message': 'Database connection failed'})
 
-                for encoding in encodings_to_try:
-                    try:
-                        df = pd.read_csv(filepath, encoding=encoding)
-                        encoding_used = encoding
-                        break
-                    except UnicodeDecodeError:
-                        continue
-                    except Exception:
-                        continue
+            try:
+                # Import CSV to MySQL
+                result = DatabaseManager.csv_to_mysql(filepath, connection)
 
-                if df is None:
-                    # Last resort: read with error handling
-                    df = pd.read_csv(filepath, encoding='utf-8', errors='ignore')
-                    encoding_used = 'utf-8 (with errors ignored)'
+                if not result["success"]:
+                    return jsonify({'success': False, 'message': f'CSV import failed: {result["error"]}'})
 
-            else:  # Excel files
-                df = pd.read_excel(filepath)
-                encoding_used = 'Excel format'
+                # Get table schema for verification
+                schema = DatabaseManager.get_table_schema(connection, result["table_name"])
+                schema_columns = [col[0] for col in schema] if schema else []
 
-            # Store data information in session
-            session['data_info'] = {
-                'type': 'file',
-                'filename': filename,
-                'filepath': filepath,
-                'shape': list(df.shape),
-                'columns': df.columns.tolist(),
-                'encoding': encoding_used
-            }
-            session['sample_data'] = df.head(5).to_dict('records')
+                # Store data information in session
+                session['data_info'] = {
+                    'type': 'csv_import',
+                    'filename': filename,
+                    'table_name': result["table_name"],
+                    'shape': [result["row_count"], len(result["columns"])],
+                    'columns': result["columns"],
+                    'encoding': result["encoding"],
+                    'date_columns': result.get("date_columns", [])
+                }
+                session['connection_info'] = {
+                    'type': 'default',
+                    'host': app.config['MYSQL_HOST'],
+                    'user': app.config['MYSQL_USER'],
+                    'password': app.config['MYSQL_PASSWORD'],
+                    'database': app.config['MYSQL_DATABASE']
+                }
 
-            return jsonify({
-                'success': True,
-                'message': f'File uploaded successfully! Data shape: {df.shape[0]} rows × {df.shape[1]} columns (Encoding: {encoding_used})',
-                'data_info': session['data_info']
-            })
+                # Get sample data
+                sample_results, sample_columns = DatabaseManager.execute_query(
+                    connection, f"SELECT * FROM {result['table_name']} LIMIT 5"
+                )
+                session['sample_data'] = [dict(zip(sample_columns, row)) for row in
+                                          sample_results] if sample_results else []
+
+                connection.close()
+
+                # Clean up uploaded file
+                os.remove(filepath)
+
+                # Build success message
+                success_msg = f'CSV imported successfully! Table {result["table_name"]} created with {result["row_count"]} rows (Encoding: {result["encoding"]})'
+                if result.get("date_columns"):
+                    success_msg += f'. Processed date columns: {", ".join(result["date_columns"])}'
+
+                return jsonify({
+                    'success': True,
+                    'message': success_msg,
+                    'data_info': session['data_info']
+                })
+
+            except Exception as e:
+                connection.close()
+                return jsonify({'success': False, 'message': f'Import failed: {str(e)}'})
 
     except Exception as e:
         logger.error(f"File upload error: {e}")
         return jsonify({'success': False, 'message': f'File processing failed: {str(e)}'})
 
     return jsonify({'success': False, 'message': 'File format not supported'})
-
-
-@app.route('/connect_db', methods=['POST'])
-def connect_database():
-    """Connect to user database"""
-    try:
-        data = request.json
-        host = data.get('host')
-        user = data.get('user')
-        password = data.get('password')
-        database = data.get('database')
-        table = data.get('table')
-
-        # Validate input
-        if not all([host, user, database, table]):
-            return jsonify({'success': False, 'message': 'Please fill in complete database information'})
-
-        connection = DatabaseManager.get_connection(host, user, password, database)
-        if not connection:
-            return jsonify({'success': False, 'message': 'Database connection failed'})
-
-        try:
-            # Get table information
-            results, columns = DatabaseManager.execute_query(
-                connection, f"SELECT * FROM {table} LIMIT 5"
-            )
-
-            row_count_result, _ = DatabaseManager.execute_query(
-                connection, f"SELECT COUNT(*) FROM {table}"
-            )
-            row_count = row_count_result[0][0] if row_count_result else 0
-
-            # Store data information in session
-            session['data_info'] = {
-                'type': 'database',
-                'table_name': table,
-                'shape': [row_count, len(columns)],
-                'columns': columns
-            }
-            session['sample_data'] = [dict(zip(columns, row)) for row in results]
-            session['db_config'] = {
-                'host': host,
-                'user': user,
-                'password': password,
-                'database': database
-            }
-
-            connection.close()
-
-            return jsonify({
-                'success': True,
-                'message': f'Database connected successfully! Table {table} contains {row_count} rows of data',
-                'data_info': session['data_info']
-            })
-
-        except Exception as e:
-            connection.close()
-            return jsonify({'success': False, 'message': f'Table query failed: {str(e)}'})
-
-    except Exception as e:
-        logger.error(f"Database connection error: {e}")
-        return jsonify({'success': False, 'message': f'Connection failed: {str(e)}'})
 
 
 @app.route('/chat')
@@ -295,7 +630,7 @@ def chat():
 
 @app.route('/send_message', methods=['POST'])
 def send_message():
-    """Handle chat messages"""
+    """Handle chat messages with LangChain analysis"""
     try:
         if 'data_info' not in session:
             return jsonify({'success': False, 'message': 'Please upload data or connect to database first'})
@@ -305,54 +640,21 @@ def send_message():
             return jsonify({'success': False, 'message': 'Message cannot be empty'})
 
         data_info = session['data_info']
-        sample_data = session.get('sample_data', [])
+        connection_info = session.get('connection_info', {})
+        table_name = data_info['table_name']
 
-        # Use OpenAI for analysis
-        ai_response = AIAnalyzer.analyze_with_openai(user_message, data_info, sample_data)
-
-        # If database type and response contains SQL, try to execute query
-        if (data_info['type'] == 'database' and
-                any(keyword in ai_response.upper() for keyword in ['SELECT', 'FROM', 'WHERE'])):
-
-            try:
-                db_config = session.get('db_config')
-                connection = DatabaseManager.get_connection(**db_config)
-
-                if connection:
-                    # Simple SQL extraction (real projects need stricter parsing)
-                    import re
-                    sql_pattern = r'(SELECT.*?;|SELECT.*?(?=\n\n|$))'
-                    sql_matches = re.findall(sql_pattern, ai_response, re.IGNORECASE | re.DOTALL)
-
-                    if sql_matches:
-                        sql_query = sql_matches[0].strip()
-                        if sql_query.endswith(';'):
-                            sql_query = sql_query[:-1]
-
-                        results, columns = DatabaseManager.execute_query(connection, sql_query)
-
-                        if results is not None:
-                            ai_response += f"\n\n📊 Query Results:\n"
-                            ai_response += f"Returned {len(results)} rows of data\n\n"
-
-                            # Format display results (limit display rows)
-                            display_rows = min(10, len(results))
-                            for i, row in enumerate(results[:display_rows]):
-                                row_data = dict(zip(columns, row))
-                                ai_response += f"Row {i + 1}: {row_data}\n"
-
-                            if len(results) > display_rows:
-                                ai_response += f"... {len(results) - display_rows} more rows"
-
-                    connection.close()
-
-            except Exception as e:
-                ai_response += f"\n\n⚠️ SQL execution error: {str(e)}"
+        # Use LangChain for analysis
+        ai_response = langchain_analyzer.analyze_with_langchain(
+            user_message,
+            table_name,
+            connection_info
+        )
 
         return jsonify({
             'success': True,
             'response': ai_response,
-            'timestamp': datetime.now().strftime('%H:%M:%S')
+            'timestamp': datetime.now().strftime('%H:%M:%S'),
+            'table_name': table_name
         })
 
     except Exception as e:
@@ -373,14 +675,39 @@ def get_data_summary():
     })
 
 
-@app.errorhandler(404)
-def not_found(error):
-    return jsonify({'success': False, 'message': 'Page not found'}), 404
+@app.route('/cleanup_table', methods=['POST'])
+def cleanup_table():
+    """Clean up temporary table"""
+    try:
+        if 'data_info' not in session:
+            return jsonify({'success': False, 'message': 'No data to clean up'})
 
+        data_info = session['data_info']
+        if data_info['type'] == 'csv_import':
+            connection = DatabaseManager.get_connection()
+            if connection:
+                try:
+                    cursor = connection.cursor()
+                    cursor.execute(f"DROP TABLE IF EXISTS {data_info['table_name']}")
+                    connection.commit()
+                    cursor.close()
+                    connection.close()
 
-@app.errorhandler(500)
-def internal_error(error):
-    return jsonify({'success': False, 'message': 'Internal server error'}), 500
+                    # Clear session
+                    session.pop('data_info', None)
+                    session.pop('connection_info', None)
+                    session.pop('sample_data', None)
+
+                    return jsonify({'success': True, 'message': 'Table cleaned up successfully'})
+                except Exception as e:
+                    connection.close()
+                    return jsonify({'success': False, 'message': f'Cleanup failed: {str(e)}'})
+
+        return jsonify({'success': True, 'message': 'No cleanup needed'})
+
+    except Exception as e:
+        logger.error(f"Cleanup error: {e}")
+        return jsonify({'success': False, 'message': f'Cleanup failed: {str(e)}'})
 
 
 if __name__ == '__main__':
