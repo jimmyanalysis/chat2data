@@ -1,0 +1,129 @@
+{
+  "name": "chat2data",
+  "nodes": [
+    {
+      "parameters": {
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.chatTrigger",
+      "typeVersion": 1.3,
+      "position": [
+        0,
+        32
+      ],
+      "id": "772a99de-0557-4855-9e5d-6971ea35b88f",
+      "name": "When chat message received",
+      "webhookId": "2ec83fa4-c912-4e34-b73e-b64185fa150a"
+    },
+    {
+      "parameters": {
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 2.2,
+      "position": [
+        256,
+        32
+      ],
+      "id": "6294b3ae-d1ba-4c85-bf6c-795c3dfcdf0c",
+      "name": "AI Agent"
+    },
+    {
+      "parameters": {
+        "model": {
+          "__rl": true,
+          "mode": "list",
+          "value": "gpt-4.1-mini"
+        },
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+      "typeVersion": 1.2,
+      "position": [
+        240,
+        272
+      ],
+      "id": "a565dadd-d758-4bc6-a2f0-9ac75cccb772",
+      "name": "OpenAI Chat Model",
+      "credentials": {
+        "openAiApi": {
+          "id": "suEdPHuC2TRjhQRH",
+          "name": "OpenAi account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "select",
+        "table": {
+          "__rl": true,
+          "value": "ai_person",
+          "mode": "list",
+          "cachedResultName": "ai_person"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.mySqlTool",
+      "typeVersion": 2.5,
+      "position": [
+        432,
+        272
+      ],
+      "id": "01eab49d-fe87-4810-aa93-6a723deb8c53",
+      "name": "Select rows from a table in MySQL",
+      "credentials": {
+        "mySql": {
+          "id": "DsnWOyXf5cenhkSw",
+          "name": "MySQL account"
+        }
+      }
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "When chat message received": {
+      "main": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "OpenAI Chat Model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Select rows from a table in MySQL": {
+      "ai_tool": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "4df429c0-134a-4214-ab81-e905b0e7c040",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "a3b17f04b5bd1fe247ea910cbc39f92134868172684301b60247f55fdab64baf"
+  },
+  "id": "QyAfoq7bl7nSVkj9",
+  "tags": []
+}

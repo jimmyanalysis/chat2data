@@ -1,0 +1,7 @@
+Flask==2.3.3
+pandas
+mysql-connector-python==8.1.0
+openai==0.28.1
+Werkzeug==2.3.7
+python-dotenv==1.0.0
+numpy
