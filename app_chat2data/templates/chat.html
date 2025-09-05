@@ -1,4 +1,4 @@
-<!-- templates/chat.html - Enhanced Chat Page -->
+<!-- templates/chat.html - Enhanced Chat Page with Auto Base URL Detection -->
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -275,22 +275,6 @@
             overflow-x: auto;
         }
 
-        .result-table {
-            border-collapse: collapse;
-            width: 100%;
-            margin: 10px 0;
-        }
-
-        .result-table th, .result-table td {
-            border: 1px solid #ddd;
-            padding: 8px;
-            text-align: left;
-        }
-
-        .result-table th {
-            background: #f2f2f2;
-        }
-
         .status-indicator {
             position: fixed;
             top: 20px;
@@ -329,7 +313,7 @@
             <button class="cleanup-btn" id="cleanupBtn" onclick="cleanupTable()" style="display: none;">
                 🗑️ Cleanup
             </button>
-            <a href="/" class="back-btn">Back to Home</a>
+            <a href="{{ base_url }}/" class="back-btn">Back to Home</a>
         </div>
     </div>
 
@@ -391,12 +375,14 @@
     <div class="status-indicator" id="statusIndicator"></div>
 
     <script>
+        // 自动检测base URL
+        const BASE_URL = '{{ base_url }}';
         let isLoading = false;
         let currentTableName = '';
 
         // Load data summary when page loads
         window.addEventListener('load', function() {
-            fetch('/get_data_summary')
+            fetch(`${BASE_URL}/get_data_summary`)
                 .then(response => response.json())
                 .then(data => {
                     if (data.success) {
@@ -437,7 +423,7 @@
             document.getElementById('sendBtn').disabled = true;
 
             // Send to server
-            fetch('/send_message', {
+            fetch(`${BASE_URL}/send_message`, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
@@ -555,7 +541,7 @@
                 return;
             }
 
-            fetch('/cleanup_table', {
+            fetch(`${BASE_URL}/cleanup_table`, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
@@ -566,7 +552,7 @@
                 if (data.success) {
                     showStatus('Table cleaned up successfully', 'success');
                     setTimeout(() => {
-                        window.location.href = '/';
+                        window.location.href = `${BASE_URL}/`;
                     }, 1500);
                 } else {
                     showStatus('Cleanup failed: ' + data.message, 'error');

@@ -8,6 +8,16 @@ class Config:
     # Flask configuration
     SECRET_KEY = os.environ.get('SECRET_KEY') or 'your-secret-key-change-this-in-production'
 
+    ENVIRONMENT = os.environ.get('ENVIRONMENT', 'development')
+
+    # 根据环境设置应用根路径
+    if ENVIRONMENT == 'production':
+        APPLICATION_ROOT = '/chat2data'
+        BASE_URL = 'https://ai2edge.com/chat2data'
+    else:
+        APPLICATION_ROOT = ''
+        BASE_URL = 'http://127.0.0.1:3001'
+
     # File upload configuration
     UPLOAD_FOLDER = 'uploads'
     MAX_CONTENT_LENGTH = 16 * 1024 * 1024  # 16MB max file size

@@ -1,4 +1,4 @@
-<!-- templates/index.html - Data Upload Page -->
+<!-- templates/index.html - Data Upload Page with Auto Base URL Detection -->
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -245,6 +245,9 @@
     </div>
 
     <script>
+        // 自动检测base URL
+        const BASE_URL = '{{ base_url }}';
+
         // File upload handling
         document.getElementById('uploadForm').addEventListener('submit', function(e) {
             e.preventDefault();
@@ -262,7 +265,7 @@
 
             showMessage('uploadMessage', 'Uploading...', 'success');
 
-            fetch('/upload', {
+            fetch(`${BASE_URL}/upload`, {
                 method: 'POST',
                 body: formData
             })
@@ -273,9 +276,10 @@
                     if (data.data_info) {
                         showDataInfo('uploadMessage', data.data_info);
                     }
-                    // Delay redirect to chat page
+                    // 使用返回的重定向URL或默认路径
+                    const redirectUrl = data.redirect_url || `${BASE_URL}/chat`;
                     setTimeout(() => {
-                        window.location.href = '/chat';
+                        window.location.href = redirectUrl;
                     }, 2000);
                 } else {
                     showMessage('uploadMessage', data.message, 'error');
@@ -295,7 +299,7 @@
 
             showMessage('dbMessage', 'Connecting to database...', 'success');
 
-            fetch('/connect_db', {
+            fetch(`${BASE_URL}/connect_db`, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
@@ -309,9 +313,9 @@
                     if (data.data_info) {
                         showDataInfo('dbMessage', data.data_info);
                     }
-                    // Delay redirect to chat page
+                    // 重定向到聊天页面
                     setTimeout(() => {
-                        window.location.href = '/chat';
+                        window.location.href = `${BASE_URL}/chat`;
                     }, 2000);
                 } else {
                     showMessage('dbMessage', data.message, 'error');
@@ -337,6 +341,9 @@
                     <p><strong>Rows:</strong> ${dataInfo.shape[0]}</p>
                     <p><strong>Columns:</strong> ${dataInfo.shape[1]}</p>
                     <p><strong>Column Names:</strong> ${dataInfo.columns.join(', ')}</p>
+                    ${dataInfo.date_columns && dataInfo.date_columns.length > 0 ?
+                        `<p><strong>Date Columns:</strong> ${dataInfo.date_columns.join(', ')}</p>` : ''}
+                    ${dataInfo.encoding ? `<p><strong>Encoding:</strong> ${dataInfo.encoding}</p>` : ''}
                 </div>
             `;
             element.innerHTML += infoHtml;

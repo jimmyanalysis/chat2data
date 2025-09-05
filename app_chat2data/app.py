@@ -28,6 +28,15 @@ app.config.from_object(Config)
 # Ensure upload directory exists
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 
+def get_base_url():
+    """根据请求来源自动确定base URL"""
+    if request:
+        # 检查是否通过代理访问（生产环境）
+        if request.headers.get('X-Forwarded-Host') or '/chat2data/' in request.path:
+            return '/chat2data'
+        # 本地开发环境
+        return ''
+    return ''
 
 def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in {'csv', 'xlsx', 'xls'}
@@ -530,13 +539,16 @@ class LangChainAnalyzer:
 langchain_analyzer = LangChainAnalyzer()
 
 
-# Routes
+# Routes with automatic base URL detection
 @app.route('/')
+@app.route('/chat2data/')
 def index():
-    return render_template('index.html')
+    base_url = get_base_url()
+    return render_template('index.html', base_url=base_url)
 
 
 @app.route('/upload', methods=['POST'])
+@app.route('/chat2data/upload', methods=['POST'])
 def upload_file():
     """Handle file upload and import to MySQL"""
     try:
@@ -603,10 +615,15 @@ def upload_file():
                 if result.get("date_columns"):
                     success_msg += f'. Processed date columns: {", ".join(result["date_columns"])}'
 
+                # 成功重定向处理
+                base_url = get_base_url()
+                redirect_url = f'{base_url}/chat' if base_url else '/chat'
+
                 return jsonify({
                     'success': True,
                     'message': success_msg,
-                    'data_info': session['data_info']
+                    'data_info': session['data_info'],
+                    'redirect_url': redirect_url
                 })
 
             except Exception as e:
@@ -621,14 +638,21 @@ def upload_file():
 
 
 @app.route('/chat')
+@app.route('/chat2data/chat')
 def chat():
     """Chat page"""
     if 'data_info' not in session:
-        return redirect(url_for('index'))
-    return render_template('chat.html', data_info=session['data_info'])
+        base_url = get_base_url()
+        if base_url:
+            return redirect(f'{base_url}/')
+        else:
+            return redirect('/')
+    base_url = get_base_url()
+    return render_template('chat.html', data_info=session['data_info'], base_url=base_url)
 
 
 @app.route('/send_message', methods=['POST'])
+@app.route('/chat2data/send_message', methods=['POST'])
 def send_message():
     """Handle chat messages with LangChain analysis"""
     try:
@@ -663,6 +687,7 @@ def send_message():
 
 
 @app.route('/get_data_summary')
+@app.route('/chat2data/get_data_summary')
 def get_data_summary():
     """Get data summary"""
     if 'data_info' not in session:
@@ -676,6 +701,7 @@ def get_data_summary():
 
 
 @app.route('/cleanup_table', methods=['POST'])
+@app.route('/chat2data/cleanup_table', methods=['POST'])
 def cleanup_table():
     """Clean up temporary table"""
     try:
@@ -711,4 +737,4 @@ def cleanup_table():
 
 
 if __name__ == '__main__':
-    app.run(debug=True, host='0.0.0.0', port=5000)
+    app.run(debug=True, host='0.0.0.0', port=3001)  # 改为3001端口
