@@ -23,8 +23,8 @@ An intelligent data analysis tool built with Flask, LangChain, and OpenAI that s
 
 ```bash
 # Clone the project or create a new directory
-mkdir flask-data-analyzer
-cd flask-data-analyzer
+mkdir chat2data
+cd chat2data
 
 # Install Python dependencies
 pip install -r requirements.txt
@@ -35,18 +35,30 @@ pip install -r requirements.txt
 Create a `.env` file:
 
 ```env
-SECRET_KEY=your-super-secret-key-here
+# Flask Configuration
+SECRET_KEY=your-super-secret-key-change-this-in-production-environment
+
+# OpenAI Configuration
 OPENAI_API_KEY=sk-your-openai-api-key-here
 
-# MySQL configuration (for storing imported CSV data)
+# MySQL Configuration for CSV Data Storage
 MYSQL_HOST=localhost
 MYSQL_USER=root
-MYSQL_PASSWORD=your-mysql-password
+MYSQL_PASSWORD=your-mysql-password-here
 MYSQL_DATABASE=data_analysis
 
-# LangChain configuration (optional)
+# MySQL Connection Pool Settings (Optional)
+MYSQL_POOL_SIZE=10
+MYSQL_MAX_OVERFLOW=20
+
+# LangChain Configuration (Optional)
 LANGCHAIN_VERBOSE=True
 LANGCHAIN_TEMPERATURE=0.0
+
+# Application Settings (Optional)
+FLASK_ENV=development
+FLASK_DEBUG=True
+ENVIRONMENT=development
 ```
 
 ### 3. Initialize Database
@@ -59,19 +71,19 @@ python database_init.py
 ### 4. Start Application
 
 ```bash
-python simplified_app.py
+python app.py
 ```
 
-Visit `http://localhost:5000` to begin using the application.
+Visit `http://localhost:3001` to begin using the application.
 
 ## Project Structure
 
 ```
 flask-data-analyzer/
-├── simplified_app.py        # Main application file
-├── config.py               # Configuration settings
-├── database_init.py        # Database initialization script
-├── requirements.txt        # Python dependencies
+├── app.py                 # Main application file
+├── config.py              # Configuration settings
+├── database_init.py       # Database initialization script
+├── requirements.txt       # Python dependencies
 ├── .env                   # Environment variables
 ├── uploads/               # File upload directory
 ├── templates/             # HTML templates
@@ -82,32 +94,6 @@ flask-data-analyzer/
     └── debug_csv_import.py  # Debug script for CSV issues
 ```
 
-## Dependencies
-
-### Core Requirements
-
-```txt
-Flask==2.3.3
-pandas==2.0.3
-mysql-connector-python==8.1.0
-python-dotenv==1.0.0
-Werkzeug==2.3.7
-openai==0.28.1
-
-# LangChain dependencies
-langchain==0.0.340
-langchain-experimental==0.0.45
-SQLAlchemy==2.0.23
-PyMySQL==1.1.0
-
-# Date parsing and encoding detection
-python-dateutil==2.8.2
-chardet==5.2.0
-
-# Additional utilities
-openpyxl==3.1.2
-xlrd==2.0.1
-```
 
 ## Usage Guide
 
@@ -182,75 +168,6 @@ Supports multiple file encodings:
 - Error handling and query optimization
 - Natural language to SQL translation
 
-## API Endpoints
-
-### File Upload
-```http
-POST /upload
-Content-Type: multipart/form-data
-
-Response:
-{
-  "success": true,
-  "message": "CSV imported successfully! Table ana_12345678 created with 1000 rows",
-  "data_info": {
-    "table_name": "ana_12345678",
-    "shape": [1000, 10],
-    "columns": ["name", "age", "city"],
-    "encoding": "utf-8",
-    "date_columns": ["order_date", "created_at"]
-  }
-}
-```
-
-### Database Connection
-```http
-POST /connect_db
-Content-Type: application/json
-
-{
-  "host": "localhost",
-  "user": "root",
-  "password": "password",
-  "database": "test_db",
-  "table": "users"
-}
-```
-
-### Chat Message
-```http
-POST /send_message
-Content-Type: application/json
-
-{
-  "message": "Show me sales trends over time"
-}
-
-Response:
-{
-  "success": true,
-  "response": "Based on the data analysis...",
-  "timestamp": "14:30:25",
-  "table_name": "ana_12345678"
-}
-```
-
-### Data Summary
-```http
-GET /get_data_summary
-
-Response:
-{
-  "success": true,
-  "data_info": {
-    "type": "csv_import",
-    "shape": [1000, 10],
-    "columns": ["id", "name", "age"]
-  },
-  "sample_data": [...]
-}
-```
-
 ## Troubleshooting
 
 ### Common Issues
@@ -295,7 +212,7 @@ python tools/encoding_detector.py your_file.csv
 ```bash
 # Enable detailed logging
 export FLASK_DEBUG=1
-python simplified_app.py
+python app.py
 
 # View application logs in console
 ```
@@ -304,13 +221,13 @@ python simplified_app.py
 
 ### Development
 ```bash
-python simplified_app.py
+python app.py
 ```
 
 ### Production with Gunicorn
 ```bash
 pip install gunicorn
-gunicorn -w 4 -b 0.0.0.0:5000 simplified_app:app
+gunicorn -w 4 -b 0.0.0.0:5000 app:app
 ```
 
 ### Docker Deployment
@@ -324,7 +241,7 @@ RUN pip install -r requirements.txt
 COPY . .
 EXPOSE 5000
 
-CMD ["gunicorn", "-w", "4", "-b", "0.0.0.0:5000", "simplified_app:app"]
+CMD ["gunicorn", "-w", "4", "-b", "0.0.0.0:5000", "app:app"]
 ```
 
 ### Nginx Configuration
