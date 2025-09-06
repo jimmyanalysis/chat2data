@@ -2,6 +2,7 @@
 
 ## app_chat2data
 A self-contained Flask application that enables interactive data analysis through chat.
+![workflow](app_chat2data/idea.png)
 
 ## Sample Data
 A sample CSV file is provided for testing the app.
