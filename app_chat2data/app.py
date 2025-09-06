@@ -688,80 +688,14 @@ class LangChainAnalyzer:
             traceback.print_exc()
             return None
 
+    # 在你的 LangChainAnalyzer 类中，替换 analyze_with_langchain 方法
     def analyze_with_langchain(self, user_message, table_name, connection_info):
-        """Analyze data with timeout fixes and better result handling"""
-        try:
-            logger.info(f"Starting analysis for message: {user_message[:100]}...")
-
-            # Check if user wants a chart first
-            chart_keywords = ['chart', 'graph', 'plot', 'visualiz', 'pie', 'bar', 'line']
-            wants_chart = any(keyword in user_message.lower() for keyword in chart_keywords)
-
-            if wants_chart:
-                return self.handle_chart_request(user_message, table_name, connection_info)
-
-            # For simple data requests, use direct SQL execution to avoid agent timeout
-            simple_requests = ['sample', 'preview', 'show', 'first', 'top', 'example']
-            is_simple_request = any(keyword in user_message.lower() for keyword in simple_requests)
-
-            if is_simple_request:
-                logger.info("Handling as simple request with direct SQL")
-                return self.handle_simple_request(user_message, table_name, connection_info)
-
-            # Build connection string for complex queries
-            if connection_info['type'] == 'default':
-                connection_string = f"mysql+pymysql://{app.config['MYSQL_USER']}:{app.config['MYSQL_PASSWORD']}@{app.config['MYSQL_HOST']}/{app.config['MYSQL_DATABASE']}"
-            else:
-                connection_string = f"mysql+pymysql://{connection_info['user']}:{connection_info['password']}@{connection_info['host']}/{connection_info['database']}"
-
-            # Create SQL agent with shorter timeouts
-            agent = self.create_basic_sql_agent(connection_string, table_name)
-            if not agent:
-                return "Failed to create SQL analysis agent."
-
-            # Enhanced prompt for complex analysis
-            enhanced_prompt = f"""
-            You are analyzing data from table '{table_name}'. 
-            User question: {user_message}
-
-            Please write and execute ONE SQL query to answer the question, then provide a clear, concise answer.
-            Do NOT execute multiple queries unless absolutely necessary.
-            Focus on being direct and helpful.
-            """
-
-            # Execute with shorter timeout
-            try:
-                if hasattr(agent, 'invoke'):
-                    logger.info("Using invoke method with timeout controls")
-                    result = agent.invoke(
-                        {"input": enhanced_prompt},
-                        config={"configurable": {"max_execution_time": 20, "max_iterations": 3}}
-                    )
-
-                    if isinstance(result, dict):
-                        if "output" in result:
-                            return result["output"]
-                        elif "result" in result:
-                            return result["result"]
-                        else:
-                            # Extract the meaningful content
-                            for key, value in result.items():
-                                if isinstance(value, str) and len(value) > 10:
-                                    return value
-                            return str(result)
-                    else:
-                        return str(result)
-                else:
-                    return "Agent execution method not available"
-
-            except Exception as exec_error:
-                logger.error(f"Agent execution failed: {exec_error}")
-                # Fall back to direct SQL execution
-                return self.handle_simple_request(user_message, table_name, connection_info)
-
-        except Exception as e:
-            logger.error(f"Analysis error: {e}")
-            return f"Analysis failed: {str(e)}"
+        # 检查是否是图表请求
+        if any(keyword in user_message.lower() for keyword in
+               ['chart', 'graph', 'plot', 'visualiz', 'pie', 'bar', 'line']):
+            return self.handle_chart_request(user_message, table_name, connection_info)
+        # 所有其他请求都用LLM直接处理
+        return self.handle_all_requests_with_llm(user_message, table_name, connection_info)
 
     def handle_simple_request(self, user_message, table_name, connection_info):
         """Handle simple requests directly with SQL to avoid agent timeouts"""
@@ -774,8 +708,33 @@ class LangChainAnalyzer:
                 return "Failed to connect to database"
 
             try:
+                # Get table schema first to validate column names
+                schema = DatabaseManager.get_table_schema(connection, table_name)
+                if not schema:
+                    connection.close()
+                    return f"Could not get schema for table {table_name}"
+
+                available_columns = [col[0].lower() for col in schema]
+
                 # Generate appropriate query based on user request
                 query = self.generate_simple_query(user_message, table_name)
+
+                # Validate that any column names in the query exist in the table
+                # Extract column names from the query (basic validation)
+                query_lower = query.lower()
+                for word in user_message.split():
+                    word_clean = re.sub(r'[^\w]', '', word.lower())
+                    if (word_clean not in ['select', 'from', 'where', 'limit', 'and', 'or'] and
+                            word_clean in query_lower and
+                            word_clean not in available_columns and
+                            len(word_clean) > 2):  # Ignore very short words
+
+                        # Try to find a similar column name
+                        similar_cols = [col for col in available_columns if word_clean in col or col in word_clean]
+                        if similar_cols:
+                            query = query.replace(word_clean, similar_cols[0])
+                            logger.info(f"Replaced '{word_clean}' with '{similar_cols[0]}' in query")
+
                 logger.info(f"Executing query: {query}")
 
                 # Execute query
@@ -783,7 +742,7 @@ class LangChainAnalyzer:
                 connection.close()
 
                 if not results:
-                    return f"No results found for query: {query}"
+                    return f"No results found for your query. Please check if the values exist in the table.\n\nSQL executed: {query}"
 
                 # Format results in a user-friendly way
                 return self.format_query_results(results, columns, query, user_message)
@@ -792,7 +751,7 @@ class LangChainAnalyzer:
                 if 'connection' in locals():
                     connection.close()
                 logger.error(f"Simple request execution failed: {exec_error}")
-                return f"Query execution failed: {str(exec_error)}"
+                return f"Query execution failed: {str(exec_error)}\n\nTried to execute: {query if 'query' in locals() else 'Query generation failed'}"
 
         except Exception as e:
             logger.error(f"Simple request handling error: {e}")
@@ -979,26 +938,76 @@ class LangChainAnalyzer:
             return f"Fallback analysis failed: {str(e)}"
 
     def generate_simple_query(self, user_message, table_name):
-        """Generate SQL query for simple requests"""
+        """Generate SQL query for simple requests with improved filtering"""
         message_lower = user_message.lower()
 
         # Extract number if mentioned
         import re
         numbers = re.findall(r'\d+', user_message)
         limit = int(numbers[0]) if numbers else 5
+        limit = min(limit, 50)  # Keep reasonable limits
 
-        # Keep reasonable limits
-        limit = min(limit, 50)
+        # First, check for specific value filtering patterns
+        # Pattern: "value of COLUMN of/where COLUMN = VALUE"
+        value_pattern = r'value of (\w+) of (\w+) (\w+)|value of (\w+) where (\w+)\s*=?\s*(\w+)'
+        match = re.search(value_pattern, message_lower)
+        if match:
+            if match.group(1):  # "value of COLUMN of COLUMN VALUE" format
+                select_col = match.group(1)
+                filter_col = match.group(2)
+                filter_val = match.group(3)
+            else:  # "value of COLUMN where COLUMN = VALUE" format
+                select_col = match.group(4)
+                filter_col = match.group(5)
+                filter_val = match.group(6)
 
-        if any(word in message_lower for word in ['sample', 'example', 'show', 'preview']):
-            return f"SELECT * FROM {table_name} LIMIT {limit}"
-        elif any(word in message_lower for word in ['first', 'top']):
-            return f"SELECT * FROM {table_name} LIMIT {limit}"
-        elif any(word in message_lower for word in ['count', 'total', 'how many']):
+            return f"SELECT {filter_col}, {select_col} FROM {table_name} WHERE LOWER({filter_col}) = LOWER('{filter_val}')"
+
+        # Pattern: "show/get COLUMN for/where COLUMN = VALUE"
+        show_pattern = r'(?:show|get|find)\s+(\w+)\s+(?:for|where)\s+(\w+)\s*=?\s*(\w+)'
+        match = re.search(show_pattern, message_lower)
+        if match:
+            select_col = match.group(1)
+            filter_col = match.group(2)
+            filter_val = match.group(3)
+            return f"SELECT {filter_col}, {select_col} FROM {table_name} WHERE LOWER({filter_col}) = LOWER('{filter_val}')"
+
+        # Pattern: "COLUMN of/for COLUMN VALUE"
+        column_pattern = r'(\w+)\s+(?:of|for)\s+(\w+)\s+(\w+)'
+        match = re.search(column_pattern, message_lower)
+        if match:
+            select_col = match.group(1)
+            filter_col = match.group(2)
+            filter_val = match.group(3)
+            return f"SELECT {filter_col}, {select_col} FROM {table_name} WHERE LOWER({filter_col}) = LOWER('{filter_val}')"
+
+        # Pattern: "where COLUMN = VALUE" or "COLUMN = VALUE"
+        where_pattern = r'(?:where\s+)?(\w+)\s*=\s*(\w+)'
+        match = re.search(where_pattern, message_lower)
+        if match:
+            filter_col = match.group(1)
+            filter_val = match.group(2)
+            return f"SELECT * FROM {table_name} WHERE LOWER({filter_col}) = LOWER('{filter_val}')"
+
+        # Pattern: "ticker ABC" or "ticker is ABC"
+        ticker_pattern = r'ticker\s+(?:is\s+)?(\w+)'
+        match = re.search(ticker_pattern, message_lower)
+        if match:
+            ticker_val = match.group(1)
+            return f"SELECT * FROM {table_name} WHERE LOWER(ticker) = LOWER('{ticker_val}')"
+
+        # Existing patterns for basic operations
+        if any(word in message_lower for word in ['count', 'total', 'how many']):
             return f"SELECT COUNT(*) as total_records FROM {table_name}"
         elif any(word in message_lower for word in ['columns', 'structure', 'schema']):
             return f"DESCRIBE {table_name}"
+        elif any(word in message_lower for word in ['sample', 'example', 'preview']):
+            return f"SELECT * FROM {table_name} LIMIT {limit}"
+        elif any(word in message_lower for word in ['first', 'top']):
+            return f"SELECT * FROM {table_name} LIMIT {limit}"
         else:
+            # Default fallback - but try to be smarter about it
+            # If the message contains column-like words, show sample data
             return f"SELECT * FROM {table_name} LIMIT {limit}"
 
     def create_basic_sql_agent(self, connection_string, table_name):
@@ -1062,7 +1071,6 @@ class LangChainAnalyzer:
             logger.error(f"Basic SQL agent creation error: {e}")
             return None
 
-
     def handle_chart_request(self, user_message, table_name, connection_info):
         """Handle chart requests by analyzing user intent and generating appropriate charts"""
         try:
@@ -1093,7 +1101,7 @@ class LangChainAnalyzer:
                     chart_type = "horizontal_bar"
 
                 # Generate appropriate SQL query based on chart type and available columns
-                sql_query = self.generate_chart_query(table_name, columns, chart_type, user_message)
+                sql_query = self.generate_chart_query_with_llm(table_name, columns, chart_type, user_message)
 
                 logger.info(f"Generated query: {sql_query}")
 
@@ -1196,7 +1204,6 @@ class LangChainAnalyzer:
             traceback.print_exc()
             return f"Failed to handle chart request: {str(e)}"
 
-
     def generate_chart_query(self, table_name, columns, chart_type, user_message):
         """Generate appropriate SQL query for chart based on available columns and user intent"""
         try:
@@ -1272,6 +1279,562 @@ class LangChainAnalyzer:
             logger.error(f"Error generating chart query: {e}")
             # Simple fallback
             return f"SELECT * FROM {table_name} LIMIT 10"
+
+    def generate_sql_with_llm(self, user_message, table_name, available_columns):
+        """Use LLM to generate SQL for user requests with table schema context"""
+        try:
+            # Create a focused prompt for SQL generation
+            prompt = f"""
+    You are a SQL expert. Generate a single SQL query based on the user's request.
+    
+    Table: {table_name}
+    Available columns: {', '.join(available_columns)}
+    
+    User request: "{user_message}"
+    
+    Rules:
+    1. Generate ONLY the SQL query, no explanation
+    2. Use column names exactly as provided
+    3. For string comparisons, use LOWER() for case-insensitive matching
+    4. Limit results to 50 rows maximum
+    5. If asking for specific values, filter appropriately
+    6. If no specific filter mentioned, show sample data
+    
+    SQL Query:"""
+
+            # Use the LLM to generate SQL
+            response = self.llm.invoke(prompt)
+
+            # Clean up the response - extract just the SQL
+            sql_query = response.strip()
+
+            # Remove common prefixes/suffixes
+            sql_query = re.sub(r'^.*?SELECT', 'SELECT', sql_query, flags=re.IGNORECASE | re.DOTALL)
+            sql_query = re.sub(r';.*$', '', sql_query)
+            sql_query = sql_query.strip()
+
+            # Basic validation
+            if not sql_query.upper().startswith('SELECT'):
+                raise ValueError("Generated query is not a SELECT statement")
+
+            # Validate column names exist
+            for col in available_columns:
+                if col.lower() in sql_query.lower():
+                    continue
+
+            logger.info(f"LLM generated SQL: {sql_query}")
+            return sql_query
+
+        except Exception as e:
+            logger.error(f"LLM SQL generation failed: {e}")
+            # Fallback to simple query
+            return f"SELECT * FROM {table_name} LIMIT 10"
+
+    def handle_simple_request_with_llm(self, user_message, table_name, connection_info):
+        """Handle simple requests using LLM for SQL generation"""
+        try:
+            logger.info(f"Handling request with LLM SQL generation: {user_message}")
+
+            # Get database connection
+            connection = DatabaseManager.get_connection()
+            if not connection:
+                return "Failed to connect to database"
+
+            try:
+                # Get table schema
+                schema = DatabaseManager.get_table_schema(connection, table_name)
+                if not schema:
+                    connection.close()
+                    return f"Could not get schema for table {table_name}"
+
+                available_columns = [col[0] for col in schema]  # Keep original case
+                logger.info(f"Available columns: {available_columns}")
+
+                # Use LLM to generate SQL
+                query = self.generate_sql_with_llm(user_message, table_name, available_columns)
+                logger.info(f"Generated query: {query}")
+
+                # Execute query
+                results, columns = DatabaseManager.execute_query(connection, query)
+                connection.close()
+
+                if not results:
+                    return f"No results found for your query.\n\nSQL executed: `{query}`\n\nAvailable columns: {', '.join(available_columns)}"
+
+                # Format results
+                return self.format_query_results(results, columns, query, user_message)
+
+            except Exception as exec_error:
+                if 'connection' in locals():
+                    connection.close()
+                logger.error(f"LLM request execution failed: {exec_error}")
+                return f"Query execution failed: {str(exec_error)}\n\nTried to execute: {query if 'query' in locals() else 'Query generation failed'}"
+
+        except Exception as e:
+            logger.error(f"LLM request handling error: {e}")
+            return f"Failed to handle request: {str(e)}"
+
+    def analyze_with_langchain_improved(self, user_message, table_name, connection_info):
+        """Improved analysis with better routing logic"""
+        try:
+            logger.info(f"Starting analysis for message: {user_message[:100]}...")
+
+            # Check if user wants a chart first
+            chart_keywords = ['chart', 'graph', 'plot', 'visualiz', 'pie', 'bar', 'line']
+            wants_chart = any(keyword in user_message.lower() for keyword in chart_keywords)
+
+            if wants_chart:
+                return self.handle_chart_request_improved(user_message, table_name, connection_info)
+
+            # For simple data queries, use LLM-generated SQL (fast and smart)
+            simple_data_requests = [
+                'show', 'get', 'find', 'select', 'display', 'list', 'what is', 'tell me',
+                'value of', 'data for', 'information about', 'details of', 'record',
+                'row', 'rows where', 'filter', 'search'
+            ]
+
+            is_simple_data_request = any(keyword in user_message.lower() for keyword in simple_data_requests)
+
+            # Also check for specific patterns that suggest direct data access
+            has_specific_filter = any(pattern in user_message.lower() for pattern in [
+                'where', '=', 'ticker', 'id', 'name', 'code', 'symbol'
+            ])
+
+            if is_simple_data_request or has_specific_filter:
+                logger.info("Handling as simple request with LLM-generated SQL")
+                return self.handle_simple_request_with_llm(user_message, table_name, connection_info)
+
+            # For complex analysis, use the full agent (but with timeout controls)
+            logger.info("Using full agent for complex analysis")
+
+            # Build connection string
+            if connection_info['type'] == 'default':
+                connection_string = f"mysql+pymysql://{app.config['MYSQL_USER']}:{app.config['MYSQL_PASSWORD']}@{app.config['MYSQL_HOST']}/{app.config['MYSQL_DATABASE']}"
+            else:
+                connection_string = f"mysql+pymysql://{connection_info['user']}:{connection_info['password']}@{connection_info['host']}/{connection_info['database']}"
+
+            # Create SQL agent with timeout controls
+            agent = self.create_basic_sql_agent(connection_string, table_name)
+            if not agent:
+                # Fallback to LLM SQL generation
+                logger.warning("Agent creation failed, falling back to LLM SQL generation")
+                return self.handle_simple_request_with_llm(user_message, table_name, connection_info)
+
+            # Enhanced prompt
+            enhanced_prompt = f"""
+            You are analyzing data from table '{table_name}'. 
+            User question: {user_message}
+    
+            Please write and execute ONE SQL query to answer the question, then provide a clear, concise answer.
+            Focus on being direct and helpful.
+            """
+
+            # Execute with timeout
+            try:
+                if hasattr(agent, 'invoke'):
+                    result = agent.invoke(
+                        {"input": enhanced_prompt},
+                        config={"configurable": {"max_execution_time": 30, "max_iterations": 3}}
+                    )
+
+                    if isinstance(result, dict):
+                        return result.get("output", result.get("result", str(result)))
+                    else:
+                        return str(result)
+                else:
+                    return "Agent execution method not available"
+
+            except Exception as exec_error:
+                logger.error(f"Agent execution failed: {exec_error}")
+                # Fall back to LLM SQL generation
+                logger.info("Falling back to LLM SQL generation after agent failure")
+                return self.handle_simple_request_with_llm(user_message, table_name, connection_info)
+
+        except Exception as e:
+            logger.error(f"Analysis error: {e}")
+            return f"Analysis failed: {str(e)}"
+
+    # Alternative: Ultra-fast direct LLM approach for all queries
+    def handle_all_requests_with_llm(self, user_message, table_name, connection_info):
+        """Handle all requests using direct LLM approach - fastest option"""
+        try:
+            logger.info(f"Handling all requests with direct LLM: {user_message}")
+
+            # Get database connection and schema
+            connection = DatabaseManager.get_connection()
+            if not connection:
+                return "Failed to connect to database"
+
+            try:
+                schema = DatabaseManager.get_table_schema(connection, table_name)
+                if not schema:
+                    connection.close()
+                    return f"Could not get schema for table {table_name}"
+
+                available_columns = [col[0] for col in schema]
+                column_types = {col[0]: col[1] for col in schema}
+
+                # Get a small sample of data for context
+                sample_results, _ = DatabaseManager.execute_query(
+                    connection, f"SELECT * FROM {table_name} LIMIT 3"
+                )
+
+                # Create comprehensive prompt
+                sample_data_str = ""
+                if sample_results:
+                    sample_data_str = f"\nSample data (first 3 rows):\n"
+                    for i, row in enumerate(sample_results):
+                        sample_data_str += f"Row {i + 1}: {dict(zip(available_columns, row))}\n"
+
+                prompt = f"""
+    You are a SQL expert analyzing a database table.
+    
+    Table: {table_name}
+    Columns and types: {column_types}
+    {sample_data_str}
+    
+    User request: "{user_message}"
+    
+    Generate a SQL query to answer the user's request. Consider:
+    1. Use exact column names from the schema
+    2. For string comparisons, use LOWER() for case-insensitive matching  
+    3. Limit results appropriately (usually 10-50 rows)
+    4. If asking about charts/visualization, focus on aggregated data
+    5. If asking for specific records, use WHERE clauses
+    
+    Respond with ONLY the SQL query, no explanation:"""
+
+                # Get SQL from LLM
+                sql_response = self.llm.invoke(prompt)
+                query = sql_response.strip()
+
+                # Clean up the query
+                query = re.sub(r'^.*?SELECT', 'SELECT', query, flags=re.IGNORECASE | re.DOTALL)
+                query = re.sub(r';.*$', '', query).strip()
+
+                logger.info(f"LLM generated query: {query}")
+
+                # Execute query
+                results, columns = DatabaseManager.execute_query(connection, query)
+                connection.close()
+
+                if not results:
+                    return f"No results found.\n\nSQL executed: `{query}`\n\nTable has columns: {', '.join(available_columns)}"
+
+                # Check if this might be a chart request
+                if any(keyword in user_message.lower() for keyword in ['chart', 'graph', 'plot', 'visualiz']):
+                    # Try to generate chart if data is suitable
+                    return self.try_generate_chart_from_results(results, columns, query, user_message, table_name)
+
+                # Format regular results
+                return self.format_query_results(results, columns, query, user_message)
+
+            except Exception as exec_error:
+                if 'connection' in locals():
+                    connection.close()
+                logger.error(f"Direct LLM execution failed: {exec_error}")
+                return f"Query execution failed: {str(exec_error)}"
+
+        except Exception as e:
+            logger.error(f"Direct LLM handling error: {e}")
+            return f"Failed to handle request: {str(e)}"
+
+
+    def generate_chart_query_with_llm(self, table_name, columns, chart_type, user_message):
+        """Generate chart SQL query using LLM for better flexibility and intelligence"""
+        try:
+            # Get column types from schema if available
+            connection = DatabaseManager.get_connection()
+            column_info = {}
+            if connection:
+                try:
+                    schema = DatabaseManager.get_table_schema(connection, table_name)
+                    column_info = {col[0]: col[1] for col in schema} if schema else {}
+
+                    # Get sample data for better context
+                    sample_results, _ = DatabaseManager.execute_query(
+                        connection, f"SELECT * FROM {table_name} LIMIT 3"
+                    )
+                    connection.close()
+                except:
+                    if connection:
+                        connection.close()
+                    sample_results = None
+            else:
+                sample_results = None
+
+            # Prepare sample data context
+            sample_context = ""
+            if sample_results:
+                sample_context = f"\nSample data (first 3 rows):\n"
+                for i, row in enumerate(sample_results):
+                    sample_context += f"Row {i + 1}: {dict(zip(columns, row))}\n"
+
+            # Create specialized prompt for chart queries
+            prompt = f"""
+    You are a SQL expert specializing in generating queries for data visualization.
+    
+    Table: {table_name}
+    Available columns: {columns}
+    Column types: {column_info}
+    {sample_context}
+    
+    Chart type requested: {chart_type}
+    User request: "{user_message}"
+    
+    Generate a SQL query that returns data suitable for a {chart_type} chart. Follow these guidelines:
+    
+    For PIE charts:
+    - Return 2 columns: category/label and numeric value
+    - Use GROUP BY for categorical data
+    - Limit to 10-15 categories for readability
+    - Order by value DESC
+    
+    For BAR/HORIZONTAL_BAR charts:
+    - Return 2 columns: x-axis labels and y-axis values
+    - Can be raw data or aggregated (GROUP BY)
+    - Limit to 15-20 data points
+    - Order meaningfully (by value or category)
+    
+    For LINE charts:
+    - Return 2 columns: x-axis (often time/sequence) and y-axis values
+    - Order by x-axis for proper line progression
+    - Limit to 50 data points max
+    
+    Key requirements:
+    1. Column names must match exactly: {columns}
+    2. For aggregations, use appropriate functions (COUNT, SUM, AVG, etc.)
+    3. Handle NULL values appropriately
+    4. Use meaningful column aliases for chart labels
+    5. Consider the user's specific request for column selection
+    
+    Examples of good chart queries:
+    - "SELECT category, COUNT(*) as count FROM table GROUP BY category ORDER BY count DESC LIMIT 10"
+    - "SELECT date_col, SUM(amount) as total FROM table GROUP BY date_col ORDER BY date_col"
+    - "SELECT product_name, AVG(price) as avg_price FROM table GROUP BY product_name ORDER BY avg_price DESC"
+    
+    Generate ONLY the SQL query, no explanation:"""
+
+            # Get SQL from LLM
+            sql_response = self.llm.invoke(prompt)
+            query = sql_response.strip()
+
+            # Clean up the query
+            query = re.sub(r'^.*?SELECT', 'SELECT', query, flags=re.IGNORECASE | re.DOTALL)
+            query = re.sub(r';.*$', '', query).strip()
+
+            # Basic validation - ensure it's a SELECT query
+            if not query.upper().startswith('SELECT'):
+                logger.warning(f"Generated query doesn't start with SELECT: {query}")
+                return self.fallback_chart_query(table_name, columns, chart_type)
+
+            # Validate that query only contains available columns (basic check)
+            query_upper = query.upper()
+            for col in columns:
+                if col.upper() in query_upper:
+                    continue  # Column exists, good
+
+            logger.info(f"LLM generated chart query: {query}")
+            return query
+
+        except Exception as e:
+            logger.error(f"LLM chart query generation failed: {e}")
+            return self.fallback_chart_query(table_name, columns, chart_type)
+
+
+    def fallback_chart_query(self, table_name, columns, chart_type):
+        """Fallback chart query generation when LLM fails"""
+        try:
+            if chart_type == "pie":
+                # Simple fallback for pie chart
+                first_text_col = columns[1] if len(columns) > 1 else columns[0]
+                return f"SELECT {first_text_col}, COUNT(*) as count FROM {table_name} GROUP BY {first_text_col} ORDER BY count DESC LIMIT 10"
+
+            elif chart_type in ["bar", "horizontal_bar"]:
+                # Simple fallback for bar chart
+                if len(columns) >= 2:
+                    return f"SELECT {columns[0]}, {columns[1]} FROM {table_name} ORDER BY {columns[1]} DESC LIMIT 15"
+                else:
+                    return f"SELECT {columns[0]}, COUNT(*) as count FROM {table_name} GROUP BY {columns[0]} ORDER BY count DESC LIMIT 15"
+
+            elif chart_type == "line":
+                # Simple fallback for line chart
+                if len(columns) >= 2:
+                    return f"SELECT {columns[0]}, {columns[1]} FROM {table_name} ORDER BY {columns[0]} LIMIT 20"
+                else:
+                    return f"SELECT {columns[0]}, COUNT(*) as count FROM {table_name} GROUP BY {columns[0]} ORDER BY {columns[0]} LIMIT 20"
+
+            # Default fallback
+            return f"SELECT * FROM {table_name} LIMIT 10"
+
+        except Exception as e:
+            logger.error(f"Fallback chart query generation failed: {e}")
+            return f"SELECT * FROM {table_name} LIMIT 10"
+
+
+    def handle_chart_request_improved(self, user_message, table_name, connection_info):
+        """Improved chart request handling with LLM-generated queries"""
+        try:
+            logger.info(f"Handling chart request with LLM: {user_message}")
+
+            # Get database connection
+            connection = DatabaseManager.get_connection()
+            if not connection:
+                return "Failed to connect to database for chart generation"
+
+            try:
+                # Get table schema to understand available columns
+                schema = DatabaseManager.get_table_schema(connection, table_name)
+                if not schema:
+                    connection.close()
+                    return f"Could not get schema for table {table_name}"
+
+                columns = [col[0] for col in schema]
+                logger.info(f"Available columns: {columns}")
+
+                # Determine chart type from user message
+                chart_type = "bar"  # default
+                if 'pie' in user_message.lower():
+                    chart_type = "pie"
+                elif 'line' in user_message.lower():
+                    chart_type = "line"
+                elif 'horizontal' in user_message.lower() or 'ranking' in user_message.lower():
+                    chart_type = "horizontal_bar"
+
+                # Use LLM to generate appropriate SQL query
+                sql_query = self.generate_chart_query_with_llm(table_name, columns, chart_type, user_message)
+
+                logger.info(f"Generated chart query: {sql_query}")
+
+                # Execute the query
+                results, result_columns = DatabaseManager.execute_query(connection, sql_query)
+                connection.close()
+
+                if not results or len(result_columns) < 2:
+                    return f"Query returned insufficient data for chart.\n\nSQL: {sql_query}\n\nTip: Try requesting specific columns or different aggregation."
+
+                # Create chart with improved error handling
+                from chart_generator import ChartGenerator
+                chart_generator = ChartGenerator()
+                base_url = get_base_url()
+
+                # Convert data for chart
+                import pandas as pd
+                df = pd.DataFrame(results, columns=result_columns)
+
+                # Generate smarter chart title
+                title = self.generate_chart_title(chart_type, result_columns, user_message)
+
+                filename = None
+
+                if chart_type == "pie":
+                    labels = df.iloc[:, 0].astype(str).tolist()
+                    values = pd.to_numeric(df.iloc[:, 1], errors='coerce').tolist()
+
+                    # Clean data and handle edge cases
+                    clean_data = [(l, v) for l, v in zip(labels, values) if not pd.isna(v) and v > 0]
+                    if clean_data:
+                        # Sort by value and limit for readability
+                        clean_data.sort(key=lambda x: x[1], reverse=True)
+                        if len(clean_data) > 10:
+                            clean_data = clean_data[:10]
+
+                        labels, values = zip(*clean_data)
+                        filename = chart_generator.create_pie_chart(list(values), list(labels), title)
+
+                elif chart_type in ["bar", "horizontal_bar"]:
+                    x_data = df.iloc[:, 0].astype(str).tolist()
+                    y_data = pd.to_numeric(df.iloc[:, 1], errors='coerce').tolist()
+
+                    # Clean data
+                    clean_data = [(x, y) for x, y in zip(x_data, y_data) if not pd.isna(y)]
+                    if clean_data:
+                        x_data, y_data = zip(*clean_data)
+                        horizontal = chart_type == "horizontal_bar"
+                        filename = chart_generator.create_bar_chart(
+                            list(x_data), list(y_data), title,
+                            result_columns[0], result_columns[1], horizontal
+                        )
+
+                elif chart_type == "line":
+                    x_data = df.iloc[:, 0].tolist()
+                    y_data = pd.to_numeric(df.iloc[:, 1], errors='coerce').tolist()
+
+                    # Clean data
+                    clean_data = [(x, y) for x, y in zip(x_data, y_data) if not pd.isna(y)]
+                    if clean_data:
+                        x_data, y_data = zip(*clean_data)
+                        filename = chart_generator.create_line_chart(
+                            list(x_data), list(y_data), title,
+                            result_columns[0], result_columns[1]
+                        )
+
+                if filename:
+                    chart_url = f"{base_url}/uploads/{filename}"
+                    return f"""✅ **Chart Generated Successfully!**
+    
+    📊 **Chart Type:** {chart_type.replace('_', ' ').title()}
+    📈 **Title:** {title}
+    
+    🔗 **View Chart:** {chart_url}
+    
+    📋 **Data Summary:**
+    - Records: {len(df)}
+    - X-axis: {result_columns[0]}
+    - Y-axis: {result_columns[1]}
+    
+    💻 **SQL Query Used:**
+    ```sql
+    {sql_query}
+    ```
+    
+    The chart visualizes your data based on the analysis of {len(df)} records from the table."""
+                else:
+                    return f"❌ Failed to generate {chart_type} chart. The data might not be suitable for this chart type.\n\nSQL used: {sql_query}\nData preview: {df.head().to_string()}"
+
+            except Exception as exec_error:
+                if 'connection' in locals():
+                    connection.close()
+                logger.error(f"Error in chart generation: {exec_error}")
+                return f"Error generating chart: {str(exec_error)}"
+
+        except Exception as e:
+            logger.error(f"Chart request handling error: {e}")
+            import traceback
+            traceback.print_exc()
+            return f"Failed to handle chart request: {str(e)}"
+
+
+    def generate_chart_title(self, chart_type, columns, user_message):
+        """Generate intelligent chart title based on context"""
+        try:
+            # Extract key words from user message
+            important_words = [word for word in user_message.split()
+                               if len(word) > 3 and word.lower() not in
+                               ['show', 'create', 'make', 'generate', 'chart', 'graph', 'plot', 'the', 'and', 'for',
+                                'with']]
+
+            # Build title based on chart type and columns
+            if chart_type == "pie":
+                if "count" in columns[1].lower():
+                    return f"Distribution of {columns[0].replace('_', ' ').title()}"
+                else:
+                    return f"{columns[1].replace('_', ' ').title()} by {columns[0].replace('_', ' ').title()}"
+
+            elif chart_type in ["bar", "horizontal_bar"]:
+                y_label = columns[1].replace('_', ' ').title()
+                x_label = columns[0].replace('_', ' ').title()
+                return f"{y_label} by {x_label}"
+
+            elif chart_type == "line":
+                return f"{columns[1].replace('_', ' ').title()} over {columns[0].replace('_', ' ').title()}"
+
+            # Fallback
+            return f"{chart_type.replace('_', ' ').title()} Chart"
+
+        except Exception as e:
+            logger.error(f"Error generating chart title: {e}")
+            return f"{chart_type.replace('_', ' ').title()} Chart"
 
 # Initialize LangChain analyzer
 langchain_analyzer = LangChainAnalyzer()
