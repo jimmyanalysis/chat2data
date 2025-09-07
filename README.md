@@ -13,3 +13,5 @@ An example n8n workflow is included for quick idea validation and prototyping.
 ![workflow](workflow_n8n.png)
 
 Online demo: https://ai2edge.com/chat2data/
+
+Youtube demo: https://www.youtube.com/watch?v=BuAb866RxpQ
