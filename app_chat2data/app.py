@@ -1909,7 +1909,6 @@ def upload_file():
                 if result.get("date_columns"):
                     success_msg += f'. Processed date columns: {", ".join(result["date_columns"])}'
 
-                # 成功重定向处理
                 base_url = get_base_url()
                 redirect_url = f'{base_url}/chat' if base_url else '/chat'
 
@@ -2034,7 +2033,6 @@ def cleanup_table():
         return jsonify({'success': False, 'message': f'Cleanup failed: {str(e)}'})
 
 
-# 添加静态文件服务路由用于图表显示
 @app.route('/uploads/<filename>')
 @app.route('/chat2data/uploads/<filename>')
 def uploaded_file(filename):
