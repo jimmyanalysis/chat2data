@@ -23,7 +23,6 @@ An intelligent data analysis tool built with Flask, LangChain, and OpenAI that s
 
 ```bash
 # Clone the project or create a new directory
-mkdir chat2data
 cd chat2data
 
 # Install Python dependencies
@@ -244,22 +243,6 @@ EXPOSE 5000
 CMD ["gunicorn", "-w", "4", "-b", "0.0.0.0:5000", "app:app"]
 ```
 
-### Nginx Configuration
-```nginx
-server {
-    listen 80;
-    server_name your-domain.com;
-    
-    location / {
-        proxy_pass http://127.0.0.1:5000;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-    }
-    
-    client_max_body_size 16M;
-}
-```
 
 ## Security Considerations
 
@@ -318,13 +301,6 @@ def time_series_analysis(df, date_col, value_col):
 pip install plotly matplotlib seaborn
 ```
 
-## Contributing
-
-1. Fork the repository
-2. Create a feature branch
-3. Make your changes
-4. Add tests for new functionality
-5. Submit a pull request
 
 ## License
 

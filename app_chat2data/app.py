@@ -481,14 +481,12 @@ class DatabaseManager:
 class LangChainAnalyzer:
     def __init__(self):
         try:
-            # 检查OpenAI API Key
             if not app.config.get('OPENAI_API_KEY'):
                 logger.error("OPENAI_API_KEY not found in config")
                 raise ValueError("OPENAI_API_KEY is required")
 
             logger.info("Initializing OpenAI LLM...")
 
-            # 尝试使用新版本的OpenAI
             try:
                 from langchain_openai import OpenAI
                 self.llm = OpenAI(

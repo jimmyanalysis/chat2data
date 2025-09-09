@@ -10,7 +10,6 @@ class Config:
 
     ENVIRONMENT = os.environ.get('ENVIRONMENT', 'development')
 
-    # 根据环境设置应用根路径
     if ENVIRONMENT == 'production':
         APPLICATION_ROOT = '/chat2data'
         BASE_URL = 'https://ai2edge.com/chat2data'
