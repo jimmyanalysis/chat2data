@@ -13,22 +13,19 @@ from config import Config
 from chart_generator import ChartGeneratorTool, create_chart_tool
 
 
-# 修复后的LangChain imports - 使用最新版本
 try:
     from langchain.agents import create_sql_agent
     from langchain.agents.agent_toolkits import SQLDatabaseToolkit
     from langchain_community.utilities import SQLDatabase
-    from langchain_openai import OpenAI  # 新版本的导入方式
+    from langchain_openai import OpenAI
     from langchain.memory import ConversationBufferMemory
 except ImportError:
-    # 如果新版本不可用，尝试旧版本
     from langchain.agents import create_sql_agent
     from langchain.agents.agent_toolkits import SQLDatabaseToolkit
     from langchain.sql_database import SQLDatabase
     from langchain.llms import OpenAI
     from langchain.memory import ConversationBufferMemory
 
-# 添加图表生成工具导入
 from chart_generator import ChartGeneratorTool
 
 # Configure logging
@@ -43,7 +40,7 @@ os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 
 
 def get_base_url():
-    """根据请求来源自动确定base URL"""
+    """ base URL"""
     if request:
         # 检查是否通过代理访问（生产环境）
         if request.headers.get('X-Forwarded-Host') or '/chat2data/' in request.path:
@@ -511,7 +508,6 @@ class LangChainAnalyzer:
                 logger.info("Successfully initialized OpenAI with legacy import")
             except Exception as e:
                 logger.error(f"Failed to initialize OpenAI: {e}")
-                # 尝试最基本的方式
                 from langchain.llms import OpenAI
                 self.llm = OpenAI(
                     openai_api_key=app.config['OPENAI_API_KEY'],
@@ -688,13 +684,10 @@ class LangChainAnalyzer:
             traceback.print_exc()
             return None
 
-    # 在你的 LangChainAnalyzer 类中，替换 analyze_with_langchain 方法
     def analyze_with_langchain(self, user_message, table_name, connection_info):
-        # 检查是否是图表请求
         if any(keyword in user_message.lower() for keyword in
-               ['chart', 'graph', 'plot', 'visualiz', 'pie', 'bar', 'line']):
+               ['chart', 'graph', 'plot', 'visual', 'pie', 'bar', 'line']):
             return self.handle_chart_request(user_message, table_name, connection_info)
-        # 所有其他请求都用LLM直接处理
         return self.handle_all_requests_with_llm(user_message, table_name, connection_info)
 
     def handle_simple_request(self, user_message, table_name, connection_info):
